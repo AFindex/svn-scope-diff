@@ -225,7 +225,7 @@ export function DiffPane({
         </div>
       ) : diff ? (
         <>
-          <div className="diff-side-labels">
+          <div className={`diff-side-labels ${canSwitchView ? "with-overview" : ""}`}>
             <div>
               <span>{diff.originalLabel}</span>
               <small>{diff.originalEncoding} · {formatBytes(diff.originalBytes)}</small>
@@ -234,6 +234,16 @@ export function DiffPane({
               <span>{diff.modifiedLabel}</span>
               <small>{diff.modifiedEncoding} · {formatBytes(diff.modifiedBytes)}</small>
             </div>
+            {canSwitchView && (
+              <div
+                className="diff-overview-label"
+                title="Diff 总览：红色表示删除，绿色表示新增；点击或拖动可快速定位"
+              >
+                <i className="removed" />
+                <i className="inserted" />
+                <span className="visually-hidden">Diff 总览</span>
+              </div>
+            )}
           </div>
 
           {diff.isBinary || diff.isDirectory ? (
@@ -267,8 +277,10 @@ export function DiffPane({
                   automaticLayout: true,
                   minimap: { enabled: false },
                   scrollBeyondLastLine: false,
-                  renderOverviewRuler: false,
+                  renderOverviewRuler: true,
+                  overviewRulerLanes: 2,
                   overviewRulerBorder: false,
+                  hideCursorInOverviewRuler: true,
                   folding: false,
                   glyphMargin: false,
                   lineNumbersMinChars: 4,
@@ -282,6 +294,8 @@ export function DiffPane({
                   enableSplitViewResizing: true,
                   renderMarginRevertIcon: false,
                   accessibilityPageSize: 20,
+                  padding: { top: 6, bottom: 6 },
+                  smoothScrolling: true,
                   hideUnchangedRegions: {
                     enabled: viewMode === "diff",
                     ...hiddenRegionOptions,
@@ -289,8 +303,10 @@ export function DiffPane({
                   scrollbar: {
                     vertical: "auto",
                     horizontal: "auto",
-                    verticalScrollbarSize: 10,
-                    horizontalScrollbarSize: 10,
+                    verticalScrollbarSize: 8,
+                    verticalSliderSize: 6,
+                    horizontalScrollbarSize: 8,
+                    horizontalSliderSize: 6,
                     useShadows: false,
                     alwaysConsumeMouseWheel: false,
                   },

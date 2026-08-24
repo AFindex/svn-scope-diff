@@ -58,6 +58,12 @@ monaco.editor.defineTheme("svn-scope-light", {
     "diffEditor.insertedLineBackground": "#E7F8EB",
     "diffEditor.removedLineBackground": "#FDEBEC",
     "diffEditor.diagonalFill": "#EFF1F5",
+    "diffEditorOverview.insertedForeground": "#42A866D9",
+    "diffEditorOverview.removedForeground": "#D85A64D9",
+    "editorOverviewRuler.background": "#F6F7FA",
     "editorOverviewRuler.border": "#E4E7EC",
+    "scrollbarSlider.background": "#8791A32E",
+    "scrollbarSlider.hoverBackground": "#7E899D52",
+    "scrollbarSlider.activeBackground": "#6F7C946B",
   },
 });

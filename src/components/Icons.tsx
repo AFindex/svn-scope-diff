@@ -8,6 +8,7 @@ type IconName =
   | "refresh"
   | "open"
   | "search"
+  | "filter"
   | "chevron"
   | "external"
   | "empty"
@@ -73,6 +74,14 @@ export function Icon({ name, size = 16, ...props }: IconProps) {
       <>
         <circle cx="10.8" cy="10.8" r="6.3" />
         <path d="m16 16 4 4" />
+      </>
+    ),
+    filter: (
+      <>
+        <path d="M4 6h16M7 12h10M10 18h4" />
+        <circle cx="8" cy="6" r="1.5" fill="currentColor" stroke="none" />
+        <circle cx="15" cy="12" r="1.5" fill="currentColor" stroke="none" />
+        <circle cx="12" cy="18" r="1.5" fill="currentColor" stroke="none" />
       </>
     ),
     chevron: <path d="m9 18 6-6-6-6" />,

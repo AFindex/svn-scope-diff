@@ -1,4 +1,11 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import {
+  ALL_FILE_TYPES,
+  extensionLabel,
+  fileTypeOptions,
+  filterChanges,
+  type ListFilterMode,
+} from "../changeFilters";
 import { displayStatusCode } from "../status";
 import type { ChangeEntry } from "../types";
 import { ChangeList, type ChangeListSortKey, type SortDirection } from "./ChangeList";
@@ -24,6 +31,33 @@ function statusCounts(changes: ChangeEntry[]) {
   }, {});
 }
 
+interface SearchFieldProps {
+  value: string;
+  placeholder: string;
+  ariaLabel: string;
+  className?: string;
+  onChange: (value: string) => void;
+}
+
+function SearchField({ value, placeholder, ariaLabel, className = "", onChange }: SearchFieldProps) {
+  return (
+    <label className={`search-box ${className}`.trim()}>
+      <Icon name="search" size={15} />
+      <input
+        value={value}
+        aria-label={ariaLabel}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder={placeholder}
+      />
+      {value && (
+        <button type="button" onClick={() => onChange("")} aria-label="清除筛选">
+          <Icon name="close" size={13} />
+        </button>
+      )}
+    </label>
+  );
+}
+
 export function ChangesPanel({
   changes,
   selectedPath,
@@ -32,11 +66,34 @@ export function ChangesPanel({
   onSelect,
   onUpdateAllTextDiffs,
 }: ChangesPanelProps) {
-  const [query, setQuery] = useState("");
+  const [treeQuery, setTreeQuery] = useState("");
   const [changeView, setChangeView] = useState<"tree" | "list">("tree");
   const [listSortKey, setListSortKey] = useState<ChangeListSortKey>("path");
   const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
+  const [listFilterMode, setListFilterMode] = useState<ListFilterMode>("text");
+  const [listTextFilter, setListTextFilter] = useState("");
+  const [listExtensionFilter, setListExtensionFilter] = useState(ALL_FILE_TYPES);
   const counts = useMemo(() => statusCounts(changes), [changes]);
+  const typeOptions = useMemo(() => fileTypeOptions(changes), [changes]);
+  const filteredListChanges = useMemo(
+    () => filterChanges(changes, listFilterMode, listTextFilter, listExtensionFilter),
+    [changes, listExtensionFilter, listFilterMode, listTextFilter],
+  );
+
+  useEffect(() => {
+    if (
+      listExtensionFilter !== ALL_FILE_TYPES
+      && !typeOptions.some((option) => option.value === listExtensionFilter)
+    ) {
+      setListExtensionFilter(ALL_FILE_TYPES);
+    }
+  }, [listExtensionFilter, typeOptions]);
+
+  const listEmptyMessage = listFilterMode === "text"
+    ? listTextFilter.trim()
+      ? `没有匹配“${listTextFilter.trim()}”的变更`
+      : "没有可显示的变更"
+    : `没有 ${extensionLabel(listExtensionFilter)} 类型的变更`;
 
   return (
     <div className="changes-panel">
@@ -81,6 +138,7 @@ export function ChangesPanel({
 
           {changeView === "list" && (
             <div className="list-sort-toolbar">
+              <span className="list-sort-caption">排序</span>
               <label className="sort-select" title="列表排序字段">
                 <span className="visually-hidden">排序字段</span>
                 <select
@@ -107,8 +165,76 @@ export function ChangesPanel({
             </div>
           )}
         </div>
+      </div>
 
-        <div className="bulk-diff-toolbar">
+      {changeView === "tree" ? (
+        <SearchField
+          value={treeQuery}
+          ariaLabel="按文件名或路径筛选层级视图"
+          placeholder="筛选文件名或路径"
+          className="tree-filter-box"
+          onChange={setTreeQuery}
+        />
+      ) : (
+        <div className="list-filter-panel">
+          <div className="list-filter-heading">
+            <span className="list-filter-title">
+              <Icon name="filter" size={14} />
+              筛选
+            </span>
+            <div className="list-filter-mode" role="group" aria-label="列表筛选方式">
+              <button
+                type="button"
+                className={listFilterMode === "text" ? "active" : ""}
+                aria-pressed={listFilterMode === "text"}
+                onClick={() => setListFilterMode("text")}
+              >
+                文本
+              </button>
+              <button
+                type="button"
+                className={listFilterMode === "extension" ? "active" : ""}
+                aria-pressed={listFilterMode === "extension"}
+                onClick={() => setListFilterMode("extension")}
+              >
+                后缀
+              </button>
+            </div>
+            <span className="list-filter-count" title="筛选结果 / 全部修改">
+              {filteredListChanges.length}/{changes.length}
+            </span>
+          </div>
+
+          {listFilterMode === "text" ? (
+            <SearchField
+              value={listTextFilter}
+              ariaLabel="按文件名或相对路径筛选列表"
+              placeholder="输入文件名或相对路径，可用空格分词"
+              className="list-filter-input"
+              onChange={setListTextFilter}
+            />
+          ) : (
+            <label className="type-filter-select">
+              <Icon name="file" size={14} />
+              <span className="visually-hidden">文件后缀</span>
+              <select
+                value={listExtensionFilter}
+                aria-label="按文件后缀筛选"
+                onChange={(event) => setListExtensionFilter(event.target.value)}
+              >
+                <option value={ALL_FILE_TYPES}>全部类型（{changes.length}）</option>
+                {typeOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}（{option.count}）
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+        </div>
+      )}
+
+      <div className="bulk-diff-toolbar">
           <button
             type="button"
             className="bulk-diff-button"
@@ -137,18 +263,7 @@ export function ChangesPanel({
               aria-label={`正在更新文本 Diff：${bulkDiffProgress.completed}/${bulkDiffProgress.total}`}
             />
           )}
-        </div>
       </div>
-
-      <label className="search-box">
-        <Icon name="search" size={15} />
-        <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="筛选文件" />
-        {query && (
-          <button type="button" onClick={() => setQuery("")} aria-label="清除筛选">
-            <Icon name="close" size={13} />
-          </button>
-        )}
-      </label>
 
       <div className="changes-scroll">
         {changes.length ? (
@@ -156,14 +271,15 @@ export function ChangesPanel({
             <ChangeTree
               changes={changes}
               selectedPath={selectedPath}
-              query={query}
+              query={treeQuery}
               onSelect={onSelect}
             />
           ) : (
             <ChangeList
-              changes={changes}
+              changes={filteredListChanges}
+              totalCount={changes.length}
+              emptyMessage={listEmptyMessage}
               selectedPath={selectedPath}
-              query={query}
               sortKey={listSortKey}
               direction={sortDirection}
               onSelect={onSelect}

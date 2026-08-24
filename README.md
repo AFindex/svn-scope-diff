@@ -8,10 +8,10 @@
 
 - 指定目录范围内递归扫描；使用 `svn status --xml --depth infinity <目录>`，不会扫描父目录。
 - 文件树展示 `M / A / D / R / C / ! / U / ~`，其中 `U` 表示未版本化；内部仍保留 SVN 原始状态码 `?`。
-- 左侧可在“层级 / 列表”间切换；列表支持按相对路径、文件名、所在目录、修改状态、扩展名排序，并可切换升降序。
+- 左侧可在“层级 / 列表”间切换；列表支持按相对路径、文件名、所在目录、修改状态、扩展名排序，并可切换升降序。筛选区可在“文本 / 后缀”间切换：文本支持文件名与相对路径空格分词，后缀选项按当前修改动态生成并显示数量，包含目录与无后缀类型。
 - 完全本地的 Monaco 并排 diff；编辑器资源随 EXE 打包，不依赖 CDN。
 - diff 顶部右侧可直接在“差异 / 全部”间切换：“差异”折叠长段未修改内容，“全部”显示完整文件。
-- 左侧变更区和右侧 diff 各自独立滚动；diff 滑块尺寸及位置由 Monaco 按实际内容自动计算。
+- 左侧变更区和右侧 diff 各自独立滚动；右侧启用 Monaco Diff Overview Ruler，以红/绿标记展示整份文件中的删除与新增，当前视口可点击或拖动定位；普通滚动条保持独立细尺寸。
 - 扫描合并 SVN 元数据查询并缓存工具探测；文本 diff 复用扫描得到的文件类型与 BASE revision，属性差异仅在展开时读取。
 - 普通浏览时最近 12 个文本 diff 使用内存 LRU 缓存；切回文件时只校验大小与纳秒级修改时间，未更新就不再读取工作文件或调用 `svn cat`。
 - 左侧“更新全部文本 Diff”按显式后缀白名单预热所有代码文本 diff，三路限并发并显示进度；批量期间缓存临时扩容，切换工作目录后恢复默认。当前包含 `.py / .cs / .bat / .cmd / .ps1 / .js / .ts / .tsx / .java / .cpp / .rs / .go / .sql / .json / .yaml` 等常见后缀，不包含 `.txt`、图片和未知后缀。
@@ -80,14 +80,14 @@ npm run portable
 
 ```text
 dist-portable\
-├─ SVN Scope 0.1.6\
+├─ SVN Scope 0.1.7\
 │  ├─ SVN Scope.exe
 │  ├─ Register-ContextMenu.cmd
 │  ├─ Unregister-ContextMenu.cmd
 │  ├─ 对应 PowerShell 脚本
 │  ├─ README-便携版.txt
 │  └─ SHA256SUMS.txt
-└─ SVN-Scope-0.1.6-win-x64.zip
+└─ SVN-Scope-0.1.7-win-x64.zip
 ```
 
 首次构建会下载 npm/crates.io 依赖；之后是纯本机构建。产物不包含安装器、自动更新器、遥测或云服务。
