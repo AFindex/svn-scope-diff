@@ -1,4 +1,4 @@
-use crate::models::{ChangeEntry, DiffResult, ScanResult};
+use crate::models::{ChangeEntry, DiffResult, FileFingerprint, ScanResult};
 use encoding_rs::{GBK, UTF_16BE, UTF_16LE};
 use quick_xml::de::from_str;
 use serde::Deserialize;
@@ -8,6 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::OnceLock;
+use std::time::UNIX_EPOCH;
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -204,6 +205,28 @@ pub fn file_diff(
             "文件较大，内嵌视图仅显示前 2 MiB；Beyond Compare 会打开完整文件。".to_owned()
         }),
     })
+}
+
+pub fn file_fingerprint(path: &str) -> Result<FileFingerprint, String> {
+    match fs::metadata(path) {
+        Ok(metadata) => Ok(FileFingerprint {
+            exists: true,
+            is_directory: metadata.is_dir(),
+            size: metadata.len(),
+            modified_ns: metadata
+                .modified()
+                .ok()
+                .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+                .map(|duration| duration.as_nanos().to_string()),
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(FileFingerprint {
+            exists: false,
+            is_directory: false,
+            size: 0,
+            modified_ns: None,
+        }),
+        Err(error) => Err(format!("无法读取文件状态 {path}：{error}")),
+    }
 }
 
 pub fn svn_base_bytes(path: &Path) -> Result<Vec<u8>, String> {
@@ -663,6 +686,23 @@ mod tests {
         let bytes = [0xFF, 0xFE, b'h', 0, b'i', 0];
         assert!(!looks_binary(&bytes));
         assert_eq!(decode_text(&bytes).text, "hi");
+    }
+
+    #[test]
+    fn detects_file_fingerprint_changes_and_deletion() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("watched.txt");
+        fs::write(&path, "one").unwrap();
+        let initial = file_fingerprint(path.to_str().unwrap()).unwrap();
+
+        fs::write(&path, "longer content").unwrap();
+        let updated = file_fingerprint(path.to_str().unwrap()).unwrap();
+        assert_ne!(initial, updated);
+        assert!(updated.exists);
+
+        fs::remove_file(&path).unwrap();
+        let deleted = file_fingerprint(path.to_str().unwrap()).unwrap();
+        assert!(!deleted.exists);
     }
 
     #[test]

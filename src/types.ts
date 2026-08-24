@@ -39,6 +39,13 @@ export interface DiffResult {
   note: string | null;
 }
 
+export interface FileFingerprint {
+  exists: boolean;
+  isDirectory: boolean;
+  size: number;
+  modifiedNs: string | null;
+}
+
 export interface TreeNode {
   key: string;
   name: string;

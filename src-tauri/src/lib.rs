@@ -2,7 +2,7 @@ mod beyond_compare;
 mod models;
 mod svn;
 
-use models::{DiffResult, ScanResult, ToolAvailability};
+use models::{DiffResult, FileFingerprint, ScanResult, ToolAvailability};
 use std::path::PathBuf;
 
 struct LaunchDirectory(Option<String>);
@@ -38,6 +38,13 @@ async fn get_file_diff(
     })
     .await
     .map_err(|error| format!("diff 任务异常结束：{error}"))?
+}
+
+#[tauri::command]
+async fn get_file_fingerprint(path: String) -> Result<FileFingerprint, String> {
+    tauri::async_runtime::spawn_blocking(move || svn::file_fingerprint(&path))
+        .await
+        .map_err(|error| format!("文件状态检测任务异常结束：{error}"))?
 }
 
 #[tauri::command]
@@ -78,6 +85,7 @@ pub fn run() {
             scan_changes,
             get_beyond_compare_availability,
             get_file_diff,
+            get_file_fingerprint,
             get_property_diff,
             open_in_beyond_compare
         ])

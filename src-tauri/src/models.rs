@@ -48,3 +48,12 @@ pub struct DiffResult {
     pub truncated: bool,
     pub note: Option<String>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileFingerprint {
+    pub exists: bool,
+    pub is_directory: bool,
+    pub size: u64,
+    pub modified_ns: Option<String>,
+}

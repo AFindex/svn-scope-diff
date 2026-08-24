@@ -8,10 +8,10 @@ Set-StrictMode -Version Latest
 
 $projectRoot = [System.IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 $portableRoot = [System.IO.Path]::GetFullPath((Join-Path $projectRoot 'dist-portable'))
-$portableDirectory = [System.IO.Path]::GetFullPath((Join-Path $portableRoot 'SVN Scope 0.1.4'))
+$portableDirectory = [System.IO.Path]::GetFullPath((Join-Path $portableRoot 'SVN Scope 0.1.5'))
 $stableDirectory = [System.IO.Path]::GetFullPath((Join-Path $portableRoot 'SVN Scope'))
 $sourceExe = Join-Path $projectRoot 'src-tauri\target\release\svn-scope.exe'
-$archive = Join-Path $portableRoot 'SVN-Scope-0.1.4-win-x64.zip'
+$archive = Join-Path $portableRoot 'SVN-Scope-0.1.5-win-x64.zip'
 $npmCommand = (Get-Command 'npm.cmd' -ErrorAction Stop).Source
 
 if (-not $portableRoot.StartsWith($projectRoot, [System.StringComparison]::OrdinalIgnoreCase)) {

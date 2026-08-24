@@ -1,4 +1,4 @@
-SVN Scope 0.1.4（Windows x64 便携版）
+SVN Scope 0.1.5（Windows x64 便携版）
 ====================================
 
 直接运行：
@@ -23,3 +23,4 @@ Windows 11：
   3. Beyond Compare 4/5 为可选项，需自行持有许可证；没有它也能使用内嵌 diff。
 
 本工具不联网：状态来自本地 working copy，BASE 内容来自 SVN pristine storage。
+重复查看未更新的文件会直接使用内存 Diff 缓存；当前文件在磁盘上更新时会提示是否重新加载。

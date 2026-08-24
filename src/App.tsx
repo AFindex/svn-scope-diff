@@ -1,10 +1,17 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { ChangeEntry, DiffResult, ScanResult, ToolAvailability } from "./types";
+import type {
+  ChangeEntry,
+  DiffResult,
+  FileFingerprint,
+  ScanResult,
+  ToolAvailability,
+} from "./types";
 import { ChangesPanel } from "./components/ChangesPanel";
 import { DiffPane } from "./components/DiffPane";
 import { Icon } from "./components/Icons";
+import { DiffCache, sameFingerprint } from "./diffCache";
 
 function errorMessage(error: unknown) {
   if (typeof error === "string") return error;
@@ -26,6 +33,28 @@ interface PropertyDiffState {
   error?: string;
 }
 
+interface PendingFileUpdate {
+  path: string;
+  relativePath: string;
+  fingerprint: FileFingerprint;
+}
+
+const DIFF_CACHE_LIMIT = 12;
+const FILE_CHECK_INTERVAL_MS = 1500;
+
+function getFileFingerprint(path: string) {
+  return invoke<FileFingerprint>("get_file_fingerprint", { path });
+}
+
+function getFileDiff(change: ChangeEntry) {
+  return invoke<DiffResult>("get_file_diff", {
+    path: change.path,
+    item: change.item,
+    isDirectory: change.isDirectory,
+    baseRevision: change.baseRevision,
+  });
+}
+
 export default function App() {
   const [scan, setScan] = useState<ScanResult>();
   const [selected, setSelected] = useState<ChangeEntry>();
@@ -37,6 +66,21 @@ export default function App() {
   const [toast, setToast] = useState<string>();
   const [beyondCompare, setBeyondCompare] = useState<ToolAvailability>();
   const [propertyDiffState, setPropertyDiffState] = useState<PropertyDiffState>();
+  const [pendingFileUpdate, setPendingFileUpdate] = useState<PendingFileUpdate>();
+  const [fileReloading, setFileReloading] = useState(false);
+  const [fileReloadError, setFileReloadError] = useState<string>();
+  const diffCacheRef = useRef(new DiffCache(DIFF_CACHE_LIMIT));
+  const selectedRef = useRef<ChangeEntry | undefined>(undefined);
+  const watchBaselineRef = useRef<{ path: string; fingerprint: FileFingerprint } | undefined>(undefined);
+  const pendingFileUpdateRef = useRef<PendingFileUpdate | undefined>(undefined);
+
+  useEffect(() => {
+    selectedRef.current = selected;
+  }, [selected]);
+
+  const storeDiffCache = useCallback((change: ChangeEntry, fingerprint: FileFingerprint, result: DiffResult) => {
+    diffCacheRef.current.put(change, fingerprint, result);
+  }, []);
 
   const scanDirectory = useCallback(async (directory: string, preserveSelection = false) => {
     setScanLoading(true);
@@ -94,28 +138,187 @@ export default function App() {
 
   useEffect(() => {
     setPropertyDiffState(undefined);
+    setPendingFileUpdate(undefined);
+    pendingFileUpdateRef.current = undefined;
+    watchBaselineRef.current = undefined;
+    setFileReloading(false);
+    setFileReloadError(undefined);
     if (!selected) {
       setDiff(undefined);
       setDiffError(undefined);
+      setDiffLoading(false);
       return;
     }
+
     let active = true;
-    setDiffLoading(true);
+    const change = selected;
+    setDiffLoading(false);
     setDiffError(undefined);
-    setDiff(undefined);
-    invoke<DiffResult>("get_file_diff", {
-      path: selected.path,
-      item: selected.item,
-      isDirectory: selected.isDirectory,
-      baseRevision: selected.baseRevision,
-    })
-      .then((result) => active && setDiff(result))
-      .catch((error) => active && setDiffError(errorMessage(error)))
-      .finally(() => active && setDiffLoading(false));
+
+    const load = async () => {
+      let fingerprint: FileFingerprint | undefined;
+      try {
+        fingerprint = await getFileFingerprint(change.path);
+      } catch {
+        fingerprint = undefined;
+      }
+      if (!active) return;
+
+      const cached = fingerprint ? diffCacheRef.current.get(change, fingerprint) : undefined;
+      if (fingerprint && cached) {
+        watchBaselineRef.current = { path: change.path, fingerprint };
+        setDiff(cached);
+        return;
+      }
+
+      setDiffLoading(true);
+      setDiff(undefined);
+      try {
+        const result = await getFileDiff(change);
+        if (!active) return;
+
+        let finalFingerprint = fingerprint;
+        try {
+          finalFingerprint = await getFileFingerprint(change.path);
+        } catch {
+          finalFingerprint = undefined;
+        }
+        if (!active) return;
+        if (
+          fingerprint
+          && finalFingerprint
+          && !sameFingerprint(fingerprint, finalFingerprint)
+        ) {
+          watchBaselineRef.current = { path: change.path, fingerprint };
+          const update = {
+            path: change.path,
+            relativePath: change.relativePath,
+            fingerprint: finalFingerprint,
+          };
+          pendingFileUpdateRef.current = update;
+          setPendingFileUpdate(update);
+        } else if (finalFingerprint) {
+          storeDiffCache(change, finalFingerprint, result);
+          watchBaselineRef.current = { path: change.path, fingerprint: finalFingerprint };
+        }
+        setDiff(result);
+      } catch (error) {
+        if (active) setDiffError(errorMessage(error));
+      } finally {
+        if (active) setDiffLoading(false);
+      }
+    };
+
+    void load();
     return () => {
       active = false;
     };
-  }, [selected]);
+  }, [selected, storeDiffCache]);
+
+  useEffect(() => {
+    if (!selected || selected.isDirectory || !diff) return;
+    let active = true;
+    const path = selected.path;
+    const relativePath = selected.relativePath;
+
+    const checkForUpdate = async () => {
+      let fingerprint: FileFingerprint;
+      try {
+        fingerprint = await getFileFingerprint(path);
+      } catch {
+        return;
+      }
+      if (!active || selectedRef.current?.path !== path) return;
+
+      const pending = pendingFileUpdateRef.current;
+      if (pending?.path === path) {
+        if (!sameFingerprint(pending.fingerprint, fingerprint)) {
+          const updated = { path, relativePath, fingerprint };
+          pendingFileUpdateRef.current = updated;
+          setPendingFileUpdate(updated);
+          setFileReloadError(undefined);
+        }
+        return;
+      }
+
+      const baseline = watchBaselineRef.current;
+      if (!baseline || baseline.path !== path) {
+        watchBaselineRef.current = { path, fingerprint };
+        return;
+      }
+      if (!sameFingerprint(baseline.fingerprint, fingerprint)) {
+        const update = { path, relativePath, fingerprint };
+        pendingFileUpdateRef.current = update;
+        setPendingFileUpdate(update);
+        setFileReloadError(undefined);
+      }
+    };
+
+    const timer = window.setInterval(() => void checkForUpdate(), FILE_CHECK_INTERVAL_MS);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [diff, selected]);
+
+  const keepCurrentDiff = useCallback(() => {
+    const update = pendingFileUpdateRef.current;
+    if (update) {
+      watchBaselineRef.current = { path: update.path, fingerprint: update.fingerprint };
+    }
+    pendingFileUpdateRef.current = undefined;
+    setPendingFileUpdate(undefined);
+    setFileReloadError(undefined);
+  }, []);
+
+  const reloadUpdatedFile = useCallback(async () => {
+    const update = pendingFileUpdateRef.current;
+    const change = selectedRef.current;
+    if (!update || !change || update.path !== change.path) {
+      pendingFileUpdateRef.current = undefined;
+      setPendingFileUpdate(undefined);
+      return;
+    }
+
+    setFileReloading(true);
+    setFileReloadError(undefined);
+    try {
+      const result = await getFileDiff(change);
+      let fingerprint = update.fingerprint;
+      try {
+        fingerprint = await getFileFingerprint(change.path);
+      } catch {
+        // The update fingerprint still safely invalidates the previous cache entry.
+      }
+      if (selectedRef.current?.path !== change.path) return;
+
+      if (!sameFingerprint(update.fingerprint, fingerprint)) {
+        const nextUpdate = {
+          path: change.path,
+          relativePath: change.relativePath,
+          fingerprint,
+        };
+        pendingFileUpdateRef.current = nextUpdate;
+        setPendingFileUpdate(nextUpdate);
+        setFileReloadError("文件在重新读取期间再次发生变化，请再次重新加载。");
+        return;
+      }
+
+      storeDiffCache(change, fingerprint, result);
+      watchBaselineRef.current = { path: change.path, fingerprint };
+      setDiffError(undefined);
+      setDiff(result);
+      setPropertyDiffState(undefined);
+      pendingFileUpdateRef.current = undefined;
+      setPendingFileUpdate(undefined);
+    } catch (error) {
+      if (selectedRef.current?.path === change.path) {
+        setFileReloadError(errorMessage(error));
+      }
+    } finally {
+      setFileReloading(false);
+    }
+  }, [storeDiffCache]);
 
   const loadPropertyDiff = useCallback(() => {
     if (!selected || !["modified", "conflicted"].includes(selected.properties)) return;
@@ -287,6 +490,47 @@ export default function App() {
         )}
         <span>本地模式</span>
       </footer>
+
+      {pendingFileUpdate && (
+        <div className="file-update-backdrop">
+          <section
+            className="file-update-dialog"
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="file-update-title"
+            aria-describedby="file-update-description"
+          >
+            <div className="file-update-icon"><Icon name="warning" size={22} /></div>
+            <div className="file-update-content">
+              <h2 id="file-update-title">文件已更新</h2>
+              <p id="file-update-description">
+                <strong title={pendingFileUpdate.path}>{pendingFileUpdate.relativePath}</strong>
+                已在磁盘上发生变化。是否重新读取并刷新当前 Diff？
+              </p>
+              {fileReloadError && <div className="file-update-error">{fileReloadError}</div>}
+              <div className="file-update-actions">
+                <button
+                  type="button"
+                  className="secondary-button"
+                  disabled={fileReloading}
+                  onClick={keepCurrentDiff}
+                >
+                  暂不重载
+                </button>
+                <button
+                  type="button"
+                  className="primary-button"
+                  disabled={fileReloading}
+                  onClick={() => void reloadUpdatedFile()}
+                >
+                  {fileReloading ? <span className="spinner" /> : <Icon name="refresh" size={15} />}
+                  {fileReloading ? "正在重新读取…" : "重新加载"}
+                </button>
+              </div>
+            </div>
+          </section>
+        </div>
+      )}
 
       {toast && <div className="toast" role="status">{toast}</div>}
     </main>
