@@ -89,3 +89,17 @@ test("evicts the least recently used entry at the configured limit", () => {
   assert.ok(cache.get(first, currentFingerprint));
   assert.ok(cache.get(third, currentFingerprint));
 });
+
+test("can expand its capacity for an explicit bulk refresh", () => {
+  const cache = new DiffCache(1);
+  const currentFingerprint = fingerprint(5, "100");
+  const first = change("F:\\wc\\first.ts");
+  const second = change("F:\\wc\\second.ts");
+
+  cache.setLimit(2);
+  cache.put(first, currentFingerprint, result(first.path));
+  cache.put(second, currentFingerprint, result(second.path));
+
+  assert.ok(cache.get(first, currentFingerprint));
+  assert.ok(cache.get(second, currentFingerprint));
+});

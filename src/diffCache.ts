@@ -23,10 +23,19 @@ export function sameFingerprint(left: FileFingerprint, right: FileFingerprint) {
 
 export class DiffCache {
   private readonly entries = new Map<string, DiffCacheEntry>();
-  private readonly limit: number;
+  private limit: number;
 
   constructor(limit: number) {
-    this.limit = limit;
+    this.limit = Math.max(1, limit);
+  }
+
+  setLimit(limit: number) {
+    this.limit = Math.max(1, limit);
+    this.trim();
+  }
+
+  clear() {
+    this.entries.clear();
   }
 
   get(change: ChangeEntry, fingerprint: FileFingerprint) {
@@ -55,6 +64,10 @@ export class DiffCache {
       result,
     });
 
+    this.trim();
+  }
+
+  private trim() {
     while (this.entries.size > this.limit) {
       const oldestKey = this.entries.keys().next().value;
       if (oldestKey === undefined) break;

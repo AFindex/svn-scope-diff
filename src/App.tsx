@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import type {
@@ -12,6 +12,7 @@ import { ChangesPanel } from "./components/ChangesPanel";
 import { DiffPane } from "./components/DiffPane";
 import { Icon } from "./components/Icons";
 import { DiffCache, sameFingerprint } from "./diffCache";
+import { textDiffChanges } from "./textDiffFiles";
 
 function errorMessage(error: unknown) {
   if (typeof error === "string") return error;
@@ -39,8 +40,27 @@ interface PendingFileUpdate {
   fingerprint: FileFingerprint;
 }
 
+interface BulkDiffProgress {
+  completed: number;
+  total: number;
+}
+
+interface BulkDiffCounters {
+  completed: number;
+  loaded: number;
+  reused: number;
+  changed: number;
+  binary: number;
+  failed: number;
+}
+
 const DIFF_CACHE_LIMIT = 12;
 const FILE_CHECK_INTERVAL_MS = 1500;
+const BULK_DIFF_CONCURRENCY = 3;
+
+function normalizedPath(path: string) {
+  return path.replace(/[\\/]+$/, "").toLowerCase();
+}
 
 function getFileFingerprint(path: string) {
   return invoke<FileFingerprint>("get_file_fingerprint", { path });
@@ -69,10 +89,15 @@ export default function App() {
   const [pendingFileUpdate, setPendingFileUpdate] = useState<PendingFileUpdate>();
   const [fileReloading, setFileReloading] = useState(false);
   const [fileReloadError, setFileReloadError] = useState<string>();
+  const [bulkDiffProgress, setBulkDiffProgress] = useState<BulkDiffProgress>();
   const diffCacheRef = useRef(new DiffCache(DIFF_CACHE_LIMIT));
   const selectedRef = useRef<ChangeEntry | undefined>(undefined);
   const watchBaselineRef = useRef<{ path: string; fingerprint: FileFingerprint } | undefined>(undefined);
   const pendingFileUpdateRef = useRef<PendingFileUpdate | undefined>(undefined);
+  const bulkDiffRunRef = useRef(0);
+  const bulkDiffRunningRef = useRef(false);
+  const activeScanDirectoryRef = useRef<string | undefined>(undefined);
+  const eligibleTextChanges = useMemo(() => textDiffChanges(scan?.changes ?? []), [scan?.changes]);
 
   useEffect(() => {
     selectedRef.current = selected;
@@ -82,7 +107,27 @@ export default function App() {
     diffCacheRef.current.put(change, fingerprint, result);
   }, []);
 
+  const requestFileReload = useCallback((change: ChangeEntry, fingerprint: FileFingerprint) => {
+    const update = {
+      path: change.path,
+      relativePath: change.relativePath,
+      fingerprint,
+    };
+    pendingFileUpdateRef.current = update;
+    setPendingFileUpdate(update);
+    setFileReloadError(undefined);
+  }, []);
+
   const scanDirectory = useCallback(async (directory: string, preserveSelection = false) => {
+    bulkDiffRunRef.current += 1;
+    bulkDiffRunningRef.current = false;
+    setBulkDiffProgress(undefined);
+    const nextDirectory = normalizedPath(directory);
+    if (activeScanDirectoryRef.current !== nextDirectory) {
+      activeScanDirectoryRef.current = nextDirectory;
+      diffCacheRef.current.clear();
+      diffCacheRef.current.setLimit(DIFF_CACHE_LIMIT);
+    }
     setScanLoading(true);
     setScanError(undefined);
     setToast(undefined);
@@ -190,13 +235,7 @@ export default function App() {
           && !sameFingerprint(fingerprint, finalFingerprint)
         ) {
           watchBaselineRef.current = { path: change.path, fingerprint };
-          const update = {
-            path: change.path,
-            relativePath: change.relativePath,
-            fingerprint: finalFingerprint,
-          };
-          pendingFileUpdateRef.current = update;
-          setPendingFileUpdate(update);
+          requestFileReload(change, finalFingerprint);
         } else if (finalFingerprint) {
           storeDiffCache(change, finalFingerprint, result);
           watchBaselineRef.current = { path: change.path, fingerprint: finalFingerprint };
@@ -213,13 +252,12 @@ export default function App() {
     return () => {
       active = false;
     };
-  }, [selected, storeDiffCache]);
+  }, [requestFileReload, selected, storeDiffCache]);
 
   useEffect(() => {
     if (!selected || selected.isDirectory || !diff) return;
     let active = true;
     const path = selected.path;
-    const relativePath = selected.relativePath;
 
     const checkForUpdate = async () => {
       let fingerprint: FileFingerprint;
@@ -233,10 +271,7 @@ export default function App() {
       const pending = pendingFileUpdateRef.current;
       if (pending?.path === path) {
         if (!sameFingerprint(pending.fingerprint, fingerprint)) {
-          const updated = { path, relativePath, fingerprint };
-          pendingFileUpdateRef.current = updated;
-          setPendingFileUpdate(updated);
-          setFileReloadError(undefined);
+          requestFileReload(selected, fingerprint);
         }
         return;
       }
@@ -247,10 +282,7 @@ export default function App() {
         return;
       }
       if (!sameFingerprint(baseline.fingerprint, fingerprint)) {
-        const update = { path, relativePath, fingerprint };
-        pendingFileUpdateRef.current = update;
-        setPendingFileUpdate(update);
-        setFileReloadError(undefined);
+        requestFileReload(selected, fingerprint);
       }
     };
 
@@ -259,7 +291,7 @@ export default function App() {
       active = false;
       window.clearInterval(timer);
     };
-  }, [diff, selected]);
+  }, [diff, requestFileReload, selected]);
 
   const keepCurrentDiff = useCallback(() => {
     const update = pendingFileUpdateRef.current;
@@ -319,6 +351,148 @@ export default function App() {
       setFileReloading(false);
     }
   }, [storeDiffCache]);
+
+  const updateAllTextDiffs = useCallback(async () => {
+    if (bulkDiffRunningRef.current) return;
+    if (!eligibleTextChanges.length) {
+      setToast("当前修改中没有符合白名单的代码文本文件");
+      return;
+    }
+
+    const runId = bulkDiffRunRef.current + 1;
+    bulkDiffRunRef.current = runId;
+    bulkDiffRunningRef.current = true;
+    diffCacheRef.current.setLimit(Math.max(
+      DIFF_CACHE_LIMIT,
+      eligibleTextChanges.length + DIFF_CACHE_LIMIT,
+    ));
+    setToast(undefined);
+    setBulkDiffProgress({ completed: 0, total: eligibleTextChanges.length });
+
+    const counters: BulkDiffCounters = {
+      completed: 0,
+      loaded: 0,
+      reused: 0,
+      changed: 0,
+      binary: 0,
+      failed: 0,
+    };
+    let nextIndex = 0;
+    let lastProgressUpdate = 0;
+
+    const isCurrentRun = () => bulkDiffRunRef.current === runId;
+    const finishOne = () => {
+      counters.completed += 1;
+      const now = Date.now();
+      if (
+        isCurrentRun()
+        && (counters.completed === eligibleTextChanges.length || now - lastProgressUpdate >= 100)
+      ) {
+        lastProgressUpdate = now;
+        setBulkDiffProgress({
+          completed: counters.completed,
+          total: eligibleTextChanges.length,
+        });
+      }
+    };
+
+    const processChange = async (change: ChangeEntry) => {
+      try {
+        const initialFingerprint = await getFileFingerprint(change.path);
+        if (!isCurrentRun()) return;
+
+        const cached = diffCacheRef.current.get(change, initialFingerprint);
+        if (cached) {
+          counters.reused += 1;
+          return;
+        }
+
+        if (selectedRef.current?.path === change.path) {
+          const pending = pendingFileUpdateRef.current;
+          const baseline = watchBaselineRef.current;
+          if (pending?.path === change.path) {
+            counters.changed += 1;
+            return;
+          }
+          if (
+            baseline
+            && baseline.path === change.path
+            && !sameFingerprint(baseline.fingerprint, initialFingerprint)
+          ) {
+            requestFileReload(change, initialFingerprint);
+            counters.changed += 1;
+            return;
+          }
+        }
+
+        const result = await getFileDiff(change);
+        if (!isCurrentRun()) return;
+        const finalFingerprint = await getFileFingerprint(change.path);
+        if (!isCurrentRun()) return;
+
+        if (!sameFingerprint(initialFingerprint, finalFingerprint)) {
+          if (selectedRef.current?.path === change.path) {
+            requestFileReload(change, finalFingerprint);
+          }
+          counters.changed += 1;
+          return;
+        }
+        if (result.isBinary) {
+          counters.binary += 1;
+          return;
+        }
+
+        if (selectedRef.current?.path === change.path) {
+          const pending = pendingFileUpdateRef.current;
+          const baseline = watchBaselineRef.current;
+          if (pending?.path === change.path) {
+            counters.changed += 1;
+            return;
+          }
+          if (
+            baseline
+            && baseline.path === change.path
+            && !sameFingerprint(baseline.fingerprint, finalFingerprint)
+          ) {
+            requestFileReload(change, finalFingerprint);
+            counters.changed += 1;
+            return;
+          }
+        }
+
+        storeDiffCache(change, finalFingerprint, result);
+        counters.loaded += 1;
+      } catch {
+        if (isCurrentRun()) counters.failed += 1;
+      }
+    };
+
+    const worker = async () => {
+      while (isCurrentRun()) {
+        const index = nextIndex;
+        nextIndex += 1;
+        if (index >= eligibleTextChanges.length) return;
+        await processChange(eligibleTextChanges[index]);
+        if (!isCurrentRun()) return;
+        finishOne();
+      }
+    };
+
+    const workerCount = Math.min(BULK_DIFF_CONCURRENCY, eligibleTextChanges.length);
+    await Promise.all(Array.from({ length: workerCount }, () => worker()));
+    if (!isCurrentRun()) return;
+
+    bulkDiffRunningRef.current = false;
+    setBulkDiffProgress(undefined);
+    const details = [
+      `新读取 ${counters.loaded}`,
+      `沿用缓存 ${counters.reused}`,
+    ];
+    if (counters.changed) details.push(`变化中跳过 ${counters.changed}`);
+    if (counters.binary) details.push(`二进制跳过 ${counters.binary}`);
+    if (counters.failed) details.push(`失败 ${counters.failed}`);
+    setToast(`文本 Diff 更新完成：${details.join("，")}`);
+  }, [eligibleTextChanges, requestFileReload, storeDiffCache]);
 
   const loadPropertyDiff = useCallback(() => {
     if (!selected || !["modified", "conflicted"].includes(selected.properties)) return;
@@ -454,7 +628,10 @@ export default function App() {
             <ChangesPanel
               changes={scan.changes}
               selectedPath={selected?.path}
+              textDiffCount={eligibleTextChanges.length}
+              bulkDiffProgress={bulkDiffProgress}
               onSelect={setSelected}
+              onUpdateAllTextDiffs={() => void updateAllTextDiffs()}
             />
           </aside>
 

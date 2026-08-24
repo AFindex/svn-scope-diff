@@ -8,7 +8,13 @@ import { Icon } from "./Icons";
 interface ChangesPanelProps {
   changes: ChangeEntry[];
   selectedPath?: string;
+  textDiffCount: number;
+  bulkDiffProgress?: {
+    completed: number;
+    total: number;
+  };
   onSelect: (change: ChangeEntry) => void;
+  onUpdateAllTextDiffs: () => void;
 }
 
 function statusCounts(changes: ChangeEntry[]) {
@@ -18,7 +24,14 @@ function statusCounts(changes: ChangeEntry[]) {
   }, {});
 }
 
-export function ChangesPanel({ changes, selectedPath, onSelect }: ChangesPanelProps) {
+export function ChangesPanel({
+  changes,
+  selectedPath,
+  textDiffCount,
+  bulkDiffProgress,
+  onSelect,
+  onUpdateAllTextDiffs,
+}: ChangesPanelProps) {
   const [query, setQuery] = useState("");
   const [changeView, setChangeView] = useState<"tree" | "list">("tree");
   const [listSortKey, setListSortKey] = useState<ChangeListSortKey>("path");
@@ -92,6 +105,37 @@ export function ChangesPanel({ changes, selectedPath, onSelect }: ChangesPanelPr
                 <Icon name={sortDirection === "asc" ? "sortAsc" : "sortDesc"} size={15} />
               </button>
             </div>
+          )}
+        </div>
+
+        <div className="bulk-diff-toolbar">
+          <button
+            type="button"
+            className="bulk-diff-button"
+            disabled={!textDiffCount || Boolean(bulkDiffProgress)}
+            title={textDiffCount
+              ? "更新全部白名单代码文本 Diff（.py、.cs、.bat、.ts、.cpp 等）"
+              : "当前修改中没有符合后缀白名单的代码文本文件"}
+            onClick={onUpdateAllTextDiffs}
+          >
+            <Icon
+              name="refresh"
+              size={14}
+              className={bulkDiffProgress ? "rotating" : undefined}
+            />
+            <span>{bulkDiffProgress ? "正在更新文本 Diff" : "更新全部文本 Diff"}</span>
+            <b aria-live="polite">
+              {bulkDiffProgress
+                ? `${bulkDiffProgress.completed}/${bulkDiffProgress.total}`
+                : textDiffCount}
+            </b>
+          </button>
+          {bulkDiffProgress && (
+            <progress
+              max={bulkDiffProgress.total}
+              value={bulkDiffProgress.completed}
+              aria-label={`正在更新文本 Diff：${bulkDiffProgress.completed}/${bulkDiffProgress.total}`}
+            />
           )}
         </div>
       </div>

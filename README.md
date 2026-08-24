@@ -13,7 +13,8 @@
 - diff 顶部右侧可直接在“差异 / 全部”间切换：“差异”折叠长段未修改内容，“全部”显示完整文件。
 - 左侧变更区和右侧 diff 各自独立滚动；diff 滑块尺寸及位置由 Monaco 按实际内容自动计算。
 - 扫描合并 SVN 元数据查询并缓存工具探测；文本 diff 复用扫描得到的文件类型与 BASE revision，属性差异仅在展开时读取。
-- 最近查看的 12 个文本 diff 使用内存 LRU 缓存；切回文件时只校验大小与纳秒级修改时间，未更新就不再读取工作文件或调用 `svn cat`。
+- 普通浏览时最近 12 个文本 diff 使用内存 LRU 缓存；切回文件时只校验大小与纳秒级修改时间，未更新就不再读取工作文件或调用 `svn cat`。
+- 左侧“更新全部文本 Diff”按显式后缀白名单预热所有代码文本 diff，三路限并发并显示进度；批量期间缓存临时扩容，切换工作目录后恢复默认。当前包含 `.py / .cs / .bat / .cmd / .ps1 / .js / .ts / .tsx / .java / .cpp / .rs / .go / .sql / .json / .yaml` 等常见后缀，不包含 `.txt`、图片和未知后缀。
 - 当前打开文件每 1.5 秒仅检查轻量元数据；发现磁盘更新后先询问是否重新加载，读取期间再次变化的内容不会写入缓存。
 - UTF-8、UTF-8 BOM、UTF-16、GBK 文本解码；二进制和超大文件有明确提示。
 - Beyond Compare 4/5 可选集成：自动发现常见安装位置，用 SVN `BASE` 快照和工作文件启动外部比较，左侧只读。
@@ -79,14 +80,14 @@ npm run portable
 
 ```text
 dist-portable\
-├─ SVN Scope 0.1.5\
+├─ SVN Scope 0.1.6\
 │  ├─ SVN Scope.exe
 │  ├─ Register-ContextMenu.cmd
 │  ├─ Unregister-ContextMenu.cmd
 │  ├─ 对应 PowerShell 脚本
 │  ├─ README-便携版.txt
 │  └─ SHA256SUMS.txt
-└─ SVN-Scope-0.1.5-win-x64.zip
+└─ SVN-Scope-0.1.6-win-x64.zip
 ```
 
 首次构建会下载 npm/crates.io 依赖；之后是纯本机构建。产物不包含安装器、自动更新器、遥测或云服务。

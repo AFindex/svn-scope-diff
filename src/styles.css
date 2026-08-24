@@ -343,6 +343,84 @@ button:disabled {
   padding: 0 10px 7px;
 }
 
+.bulk-diff-toolbar {
+  position: relative;
+  padding: 0 10px 8px;
+}
+
+.bulk-diff-button {
+  display: flex;
+  width: 100%;
+  height: 30px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  color: #536074;
+  border: 1px solid #d7dce6;
+  border-radius: 6px;
+  outline: 0;
+  background: linear-gradient(#fff, #f5f7fa);
+  cursor: pointer;
+  font-size: 10.5px;
+  transition: border-color 120ms, background 120ms, color 120ms, box-shadow 120ms;
+}
+
+.bulk-diff-button > span {
+  min-width: 0;
+  overflow: hidden;
+  flex: 1;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bulk-diff-button > b {
+  display: grid;
+  min-width: 24px;
+  height: 18px;
+  padding: 0 5px;
+  place-items: center;
+  color: #5870ad;
+  border-radius: 999px;
+  background: #e8edfa;
+  font-size: 9.5px;
+  font-weight: 650;
+}
+
+.bulk-diff-button:hover:not(:disabled) {
+  color: #345bc2;
+  border-color: #b9c6e7;
+  background: #fff;
+}
+
+.bulk-diff-button:focus-visible {
+  border-color: #9bb0ea;
+  box-shadow: 0 0 0 2px #dce5ff;
+}
+
+.bulk-diff-toolbar progress {
+  position: absolute;
+  right: 15px;
+  bottom: 8px;
+  left: 15px;
+  width: calc(100% - 30px);
+  height: 2px;
+  overflow: hidden;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  appearance: none;
+}
+
+.bulk-diff-toolbar progress::-webkit-progress-bar {
+  background: transparent;
+}
+
+.bulk-diff-toolbar progress::-webkit-progress-value {
+  border-radius: 999px;
+  background: #5879dc;
+}
+
 .change-view-switch {
   display: inline-flex;
   height: 27px;
