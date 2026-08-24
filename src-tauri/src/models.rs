@@ -11,6 +11,7 @@ pub struct ChangeEntry {
     pub status_code: String,
     pub is_directory: bool,
     pub tree_conflicted: bool,
+    pub base_revision: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -25,11 +26,9 @@ pub struct ToolAvailability {
 pub struct ScanResult {
     pub directory: String,
     pub wc_root: String,
-    pub repository_url: Option<String>,
     pub revision: Option<String>,
     pub svn_version: String,
     pub changes: Vec<ChangeEntry>,
-    pub beyond_compare: ToolAvailability,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -48,5 +47,4 @@ pub struct DiffResult {
     pub is_directory: bool,
     pub truncated: bool,
     pub note: Option<String>,
-    pub property_diff: Option<String>,
 }

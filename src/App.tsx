@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { ChangeEntry, DiffResult, ScanResult } from "./types";
+import type { ChangeEntry, DiffResult, ScanResult, ToolAvailability } from "./types";
 import { ChangesPanel } from "./components/ChangesPanel";
 import { DiffPane } from "./components/DiffPane";
 import { Icon } from "./components/Icons";
@@ -18,6 +18,14 @@ function folderName(path?: string) {
   return parts.at(-1) || path;
 }
 
+interface PropertyDiffState {
+  path: string;
+  loading: boolean;
+  loaded: boolean;
+  value?: string | null;
+  error?: string;
+}
+
 export default function App() {
   const [scan, setScan] = useState<ScanResult>();
   const [selected, setSelected] = useState<ChangeEntry>();
@@ -27,6 +35,8 @@ export default function App() {
   const [scanError, setScanError] = useState<string>();
   const [diffError, setDiffError] = useState<string>();
   const [toast, setToast] = useState<string>();
+  const [beyondCompare, setBeyondCompare] = useState<ToolAvailability>();
+  const [propertyDiffState, setPropertyDiffState] = useState<PropertyDiffState>();
 
   const scanDirectory = useCallback(async (directory: string, preserveSelection = false) => {
     setScanLoading(true);
@@ -69,6 +79,21 @@ export default function App() {
   }, [scanDirectory]);
 
   useEffect(() => {
+    let active = true;
+    invoke<ToolAvailability>("get_beyond_compare_availability")
+      .then((availability) => {
+        if (active) setBeyondCompare(availability);
+      })
+      .catch(() => {
+        if (active) setBeyondCompare({ available: false, path: null });
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    setPropertyDiffState(undefined);
     if (!selected) {
       setDiff(undefined);
       setDiffError(undefined);
@@ -81,7 +106,8 @@ export default function App() {
     invoke<DiffResult>("get_file_diff", {
       path: selected.path,
       item: selected.item,
-      properties: selected.properties,
+      isDirectory: selected.isDirectory,
+      baseRevision: selected.baseRevision,
     })
       .then((result) => active && setDiff(result))
       .catch((error) => active && setDiffError(errorMessage(error)))
@@ -90,6 +116,28 @@ export default function App() {
       active = false;
     };
   }, [selected]);
+
+  const loadPropertyDiff = useCallback(() => {
+    if (!selected || !["modified", "conflicted"].includes(selected.properties)) return;
+    if (
+      propertyDiffState?.path === selected.path
+      && (propertyDiffState.loading || (propertyDiffState.loaded && !propertyDiffState.error))
+    ) return;
+
+    const path = selected.path;
+    setPropertyDiffState({ path, loading: true, loaded: false });
+    void invoke<string | null>("get_property_diff", { path })
+      .then((value) => {
+        setPropertyDiffState((current) => current?.path === path
+          ? { path, loading: false, loaded: true, value }
+          : current);
+      })
+      .catch((error) => {
+        setPropertyDiffState((current) => current?.path === path
+          ? { path, loading: false, loaded: true, error: errorMessage(error) }
+          : current);
+      });
+  }, [propertyDiffState, selected]);
 
   const chooseDirectory = useCallback(async () => {
     const selectedDirectory = await open({
@@ -141,6 +189,9 @@ export default function App() {
   };
 
   const rootIsScope = scan?.directory === scan?.wcRoot;
+  const activePropertyDiff = propertyDiffState?.path === selected?.path
+    ? propertyDiffState
+    : undefined;
 
   return (
     <main className="app-shell">
@@ -211,9 +262,14 @@ export default function App() {
               diff={diff}
               loading={diffLoading}
               error={diffError}
-              beyondCompareAvailable={scan.beyondCompare.available}
-              beyondComparePath={scan.beyondCompare.path}
+              beyondCompareAvailable={beyondCompare?.available ?? false}
+              beyondComparePath={beyondCompare?.path}
               onOpenBeyondCompare={() => void openBeyondCompare()}
+              propertyDiff={activePropertyDiff?.value}
+              propertyDiffLoading={activePropertyDiff?.loading ?? false}
+              propertyDiffLoaded={activePropertyDiff?.loaded ?? false}
+              propertyDiffError={activePropertyDiff?.error}
+              onLoadPropertyDiff={loadPropertyDiff}
             />
           </div>
         </div>
@@ -224,9 +280,9 @@ export default function App() {
         {scan?.revision && <span>工作副本 r{scan.revision}</span>}
         <span className="statusbar-spacer" />
         {scan && (
-          <span className={scan.beyondCompare.available ? "tool-ready" : "tool-muted"}>
+          <span className={beyondCompare?.available ? "tool-ready" : "tool-muted"}>
             <span className="tiny-dot" />
-            Beyond Compare {scan.beyondCompare.available ? "可用" : "未检测到"}
+            Beyond Compare {!beyondCompare ? "检测中" : beyondCompare.available ? "可用" : "未检测到"}
           </span>
         )}
         <span>本地模式</span>

@@ -998,6 +998,22 @@ button:disabled {
   white-space: pre-wrap;
 }
 
+.property-diff-message {
+  display: flex;
+  min-height: 42px;
+  align-items: center;
+  gap: 7px;
+  padding: 9px 12px 12px;
+  color: #858c97;
+  border-top: 1px solid #e3e6ea;
+  background: #fff;
+  font-size: 10.5px;
+}
+
+.property-diff-message.error {
+  color: #a24950;
+}
+
 .diff-mode-switch {
   display: inline-flex;
   height: 28px;

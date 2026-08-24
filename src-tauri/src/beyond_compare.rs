@@ -4,24 +4,30 @@ use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+static AVAILABILITY: OnceLock<ToolAvailability> = OnceLock::new();
 
 pub fn availability() -> ToolAvailability {
-    let path = locate();
-    ToolAvailability {
-        available: path.is_some(),
-        path: path.map(|value| value.to_string_lossy().into_owned()),
-    }
+    AVAILABILITY
+        .get_or_init(|| {
+            let path = locate();
+            ToolAvailability {
+                available: path.is_some(),
+                path: path.map(|value| value.to_string_lossy().into_owned()),
+            }
+        })
+        .clone()
 }
 
 pub fn open(path: &str, item: &str) -> Result<String, String> {
-    let executable = locate().ok_or_else(|| {
-        "未找到 Beyond Compare 4/5。内嵌 diff 不受影响；安装后刷新即可启用。".to_owned()
+    let executable = availability().path.map(PathBuf::from).ok_or_else(|| {
+        "未找到 Beyond Compare 4/5。内嵌 diff 不受影响；安装后重启应用即可启用。".to_owned()
     })?;
     let target = PathBuf::from(path);
     if target.is_dir() {

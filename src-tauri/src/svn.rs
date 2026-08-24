@@ -1,7 +1,8 @@
-use crate::models::{ChangeEntry, DiffResult, ScanResult, ToolAvailability};
+use crate::models::{ChangeEntry, DiffResult, ScanResult};
 use encoding_rs::{GBK, UTF_16BE, UTF_16LE};
 use quick_xml::de::from_str;
 use serde::Deserialize;
+use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -14,7 +15,13 @@ use std::os::windows::process::CommandExt;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const MAX_TEXT_BYTES: usize = 2 * 1024 * 1024;
 
-static SVN_EXECUTABLE: OnceLock<Result<PathBuf, String>> = OnceLock::new();
+static SVN_INSTALLATION: OnceLock<Result<SvnInstallation, String>> = OnceLock::new();
+
+#[derive(Clone)]
+struct SvnInstallation {
+    executable: PathBuf,
+    version: String,
+}
 
 #[derive(Debug, Deserialize)]
 struct StatusDocument {
@@ -46,20 +53,39 @@ struct WorkingCopyStatus {
     props: String,
     #[serde(rename = "@tree-conflicted", default)]
     tree_conflicted: bool,
+    #[serde(rename = "@revision", default)]
+    revision: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct InfoDocument {
+    #[serde(rename = "entry", default)]
+    entries: Vec<InfoEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct InfoEntry {
+    #[serde(rename = "@kind")]
+    kind: String,
+    #[serde(rename = "@revision", default)]
+    revision: Option<String>,
+    #[serde(rename = "wc-info", default)]
+    wc_info: Option<WorkingCopyInfo>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkingCopyInfo {
+    #[serde(rename = "wcroot-abspath", default)]
+    wcroot_abspath: Option<String>,
 }
 
 fn default_props() -> String {
     "none".to_owned()
 }
 
-pub fn scan(directory: &str, beyond_compare: ToolAvailability) -> Result<ScanResult, String> {
+pub fn scan(directory: &str) -> Result<ScanResult, String> {
     let selected = normalize_existing_directory(directory)?;
-    let wc_root = find_working_copy_root(&selected)?;
-    let info_target = if svn_show_item("wc-root", &selected).is_ok() {
-        selected.as_path()
-    } else {
-        wc_root.as_path()
-    };
+    let (wc_root, revision) = working_copy_metadata(&selected)?;
 
     let output = run_svn([
         OsString::from("status"),
@@ -73,50 +99,29 @@ pub fn scan(directory: &str, beyond_compare: ToolAvailability) -> Result<ScanRes
     let xml = String::from_utf8(output.stdout)
         .map_err(|_| "svn status 返回的 XML 不是有效 UTF-8".to_owned())?;
     let mut changes = parse_status_xml(&xml, &selected)?;
+    populate_missing_kinds(&mut changes);
 
-    for change in &mut changes {
-        if !change.is_directory && matches!(change.item.as_str(), "deleted" | "missing") {
-            change.is_directory = svn_show_item("kind", Path::new(&change.path))
-                .map(|kind| kind.trim() == "dir")
-                .unwrap_or(false);
-        }
-    }
+    changes.sort_by_cached_key(|change| change.relative_path.to_lowercase());
 
-    changes.sort_by(|left, right| {
-        left.relative_path
-            .to_lowercase()
-            .cmp(&right.relative_path.to_lowercase())
-    });
-
-    let repository_url = svn_show_item("url", info_target).ok();
-    let revision = svn_show_item("revision", info_target).ok();
     let svn_version = svn_version()?;
 
     Ok(ScanResult {
         directory: path_string(&selected),
         wc_root: path_string(&wc_root),
-        repository_url,
         revision,
         svn_version,
         changes,
-        beyond_compare,
     })
 }
 
-pub fn file_diff(path: &str, item: &str, properties: &str) -> Result<DiffResult, String> {
+pub fn file_diff(
+    path: &str,
+    item: &str,
+    is_directory: bool,
+    base_revision: Option<&str>,
+) -> Result<DiffResult, String> {
     let target = PathBuf::from(path);
-    let is_directory = target.is_dir()
-        || svn_show_item("kind", &target)
-            .map(|kind| kind.trim() == "dir")
-            .unwrap_or(false);
-
-    let property_diff = if matches!(properties, "modified" | "conflicted") {
-        svn_property_diff(&target)
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-    } else {
-        None
-    };
+    let is_directory = is_directory || target.is_dir();
 
     if is_directory {
         return Ok(DiffResult {
@@ -133,7 +138,6 @@ pub fn file_diff(path: &str, item: &str, properties: &str) -> Result<DiffResult,
             is_directory: true,
             truncated: false,
             note: Some("这是目录变更；目录本身没有可展示的文本内容。".to_owned()),
-            property_diff,
         });
     }
 
@@ -152,8 +156,7 @@ pub fn file_diff(path: &str, item: &str, properties: &str) -> Result<DiffResult,
     let base_binary = looks_binary(&base_bytes);
     let working_binary = looks_binary(&working_bytes);
     let is_binary = base_binary || working_binary;
-    let revision = svn_show_item("revision", &target).ok();
-    let original_label = revision
+    let original_label = base_revision
         .map(|value| format!("BASE · r{}", value.trim()))
         .unwrap_or_else(|| "BASE".to_owned());
 
@@ -175,7 +178,6 @@ pub fn file_diff(path: &str, item: &str, properties: &str) -> Result<DiffResult,
                 "检测到二进制内容。可使用 Beyond Compare 查看图片、压缩包或十六进制差异。"
                     .to_owned(),
             ),
-            property_diff,
         });
     }
 
@@ -201,7 +203,6 @@ pub fn file_diff(path: &str, item: &str, properties: &str) -> Result<DiffResult,
         note: truncated.then(|| {
             "文件较大，内嵌视图仅显示前 2 MiB；Beyond Compare 会打开完整文件。".to_owned()
         }),
-        property_diff,
     })
 }
 
@@ -216,7 +217,8 @@ pub fn svn_base_bytes(path: &Path) -> Result<Vec<u8>, String> {
     Ok(output.stdout)
 }
 
-fn svn_property_diff(path: &Path) -> Result<String, String> {
+pub fn property_diff(path: &str) -> Result<Option<String>, String> {
+    let path = Path::new(path);
     let output = run_svn([
         OsString::from("diff"),
         OsString::from("--properties-only"),
@@ -224,7 +226,8 @@ fn svn_property_diff(path: &Path) -> Result<String, String> {
         OsString::from("--"),
         svn_target(path),
     ])?;
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    let value = String::from_utf8_lossy(&output.stdout).into_owned();
+    Ok((!value.trim().is_empty()).then_some(value))
 }
 
 fn parse_status_xml(xml: &str, selected: &Path) -> Result<Vec<ChangeEntry>, String> {
@@ -238,6 +241,7 @@ fn parse_status_xml(xml: &str, selected: &Path) -> Result<Vec<ChangeEntry>, Stri
             if !is_interesting(&entry.status) {
                 continue;
             }
+            let status = entry.status;
 
             let raw_path = PathBuf::from(&entry.path);
             let absolute = if raw_path.is_absolute() {
@@ -269,30 +273,39 @@ fn parse_status_xml(xml: &str, selected: &Path) -> Result<Vec<ChangeEntry>, Stri
                 path: path_string(&absolute),
                 relative_path: relative,
                 name,
-                status_code: status_code(&entry.status),
+                status_code: status_code(&status),
                 is_directory: absolute.is_dir(),
-                item: entry.status.item,
-                properties: entry.status.props,
-                tree_conflicted: entry.status.tree_conflicted,
+                item: status.item,
+                properties: status.props,
+                tree_conflicted: status.tree_conflicted,
+                base_revision: status.revision,
             });
         }
     }
 
-    let relative_paths: Vec<String> = changes
-        .iter()
-        .map(|change| change.relative_path.clone())
-        .collect();
-    for change in &mut changes {
-        if change.is_directory {
-            continue;
-        }
-        let prefix = format!("{}/", change.relative_path.trim_end_matches('/'));
-        change.is_directory = relative_paths
-            .iter()
-            .any(|candidate| candidate != &change.relative_path && candidate.starts_with(&prefix));
-    }
+    infer_directory_entries(&mut changes);
 
     Ok(changes)
+}
+
+fn infer_directory_entries(changes: &mut [ChangeEntry]) {
+    let mut ancestor_paths = HashSet::new();
+    for change in changes.iter() {
+        let mut path = change.relative_path.as_str();
+        while let Some((parent, _)) = path.rsplit_once('/') {
+            if parent.is_empty() {
+                break;
+            }
+            ancestor_paths.insert(parent.to_owned());
+            path = parent;
+        }
+    }
+
+    for change in changes {
+        if ancestor_paths.contains(&change.relative_path) {
+            change.is_directory = true;
+        }
+    }
 }
 
 fn is_interesting(status: &WorkingCopyStatus) -> bool {
@@ -333,35 +346,94 @@ fn normalize_existing_directory(directory: &str) -> Result<PathBuf, String> {
     std::path::absolute(&path).map_err(|error| format!("无法解析目录 {}：{error}", path.display()))
 }
 
-fn find_working_copy_root(selected: &Path) -> Result<PathBuf, String> {
-    let mut current = Some(selected);
-    while let Some(path) = current {
-        if let Ok(value) = svn_show_item("wc-root", path) {
-            let root = PathBuf::from(value.trim());
-            return std::path::absolute(&root).or(Ok(root));
+fn working_copy_metadata(selected: &Path) -> Result<(PathBuf, Option<String>), String> {
+    let info = match svn_info(selected) {
+        Ok(info) => info,
+        Err(_) => {
+            let local_root = selected
+                .ancestors()
+                .find(|path| path.join(".svn").is_dir())
+                .ok_or_else(|| {
+                    format!(
+                        "“{}” 不在 SVN 工作副本中。请选择已 checkout 项目内的目录。",
+                        selected.display()
+                    )
+                })?;
+            svn_info(local_root)
+                .map_err(|_| format!("“{}” 不在可读取的 SVN 工作副本中。", selected.display()))?
         }
-        current = path.parent();
-    }
-    Err(format!(
-        "“{}” 不在 SVN 工作副本中。请选择已 checkout 项目内的目录。",
-        selected.display()
-    ))
+    };
+
+    let wc_root = info
+        .wc_info
+        .and_then(|wc_info| wc_info.wcroot_abspath)
+        .map(PathBuf::from)
+        .or_else(|| {
+            selected
+                .ancestors()
+                .find(|path| path.join(".svn").is_dir())
+                .map(Path::to_path_buf)
+        })
+        .ok_or_else(|| format!("无法确定 SVN 工作副本根目录：{}", selected.display()))?;
+    let wc_root = std::path::absolute(&wc_root).unwrap_or(wc_root);
+    Ok((wc_root, info.revision))
 }
 
-pub fn svn_show_item(item: &str, path: &Path) -> Result<String, String> {
-    let output = run_svn([
+fn svn_info(path: &Path) -> Result<InfoEntry, String> {
+    svn_info_entries(&[path.to_path_buf()])?
+        .into_iter()
+        .next()
+        .ok_or_else(|| format!("svn info 没有返回目标信息：{}", path.display()))
+}
+
+fn svn_info_entries(paths: &[PathBuf]) -> Result<Vec<InfoEntry>, String> {
+    let mut arguments = vec![
         OsString::from("info"),
-        OsString::from("--show-item"),
-        OsString::from(item),
+        OsString::from("--xml"),
+        OsString::from("--depth"),
+        OsString::from("empty"),
         OsString::from("--"),
-        svn_target(path),
-    ])?;
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    ];
+    arguments.extend(paths.iter().map(|path| svn_target(path)));
+    let output = run_svn(arguments)?;
+    let xml = String::from_utf8(output.stdout)
+        .map_err(|_| "svn info 返回的 XML 不是有效 UTF-8".to_owned())?;
+    let document: InfoDocument =
+        from_str(&xml).map_err(|error| format!("无法解析 svn info XML：{error}"))?;
+    Ok(document.entries)
+}
+
+fn populate_missing_kinds(changes: &mut [ChangeEntry]) {
+    let unresolved: Vec<(usize, PathBuf)> = changes
+        .iter()
+        .enumerate()
+        .filter(|(_, change)| {
+            !change.is_directory && matches!(change.item.as_str(), "deleted" | "missing")
+        })
+        .map(|(index, change)| (index, PathBuf::from(&change.path)))
+        .collect();
+
+    for chunk in unresolved.chunks(32) {
+        let targets: Vec<PathBuf> = chunk.iter().map(|(_, path)| path.clone()).collect();
+        match svn_info_entries(&targets) {
+            Ok(entries) if entries.len() == chunk.len() => {
+                for ((index, _), entry) in chunk.iter().zip(entries) {
+                    changes[*index].is_directory = entry.kind == "dir";
+                }
+            }
+            _ => {
+                for (index, path) in chunk {
+                    if let Ok(entry) = svn_info(path) {
+                        changes[*index].is_directory = entry.kind == "dir";
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn svn_version() -> Result<String, String> {
-    let output = run_svn([OsString::from("--version"), OsString::from("--quiet")])?;
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    Ok(svn_installation()?.version)
 }
 
 fn run_svn<I, S>(arguments: I) -> Result<Output, String>
@@ -369,13 +441,13 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let executable = svn_executable()?;
-    let mut command = Command::new(&executable);
+    let installation = svn_installation()?;
+    let mut command = Command::new(&installation.executable);
     command.args(arguments);
     configure_no_window(&mut command);
     let output = command
         .output()
-        .map_err(|error| format!("无法启动 {}：{error}", executable.display()))?;
+        .map_err(|error| format!("无法启动 {}：{error}", installation.executable.display()))?;
     if output.status.success() {
         Ok(output)
     } else {
@@ -388,11 +460,11 @@ where
     }
 }
 
-fn svn_executable() -> Result<PathBuf, String> {
-    SVN_EXECUTABLE.get_or_init(locate_svn).clone()
+fn svn_installation() -> Result<SvnInstallation, String> {
+    SVN_INSTALLATION.get_or_init(locate_svn).clone()
 }
 
-fn locate_svn() -> Result<PathBuf, String> {
+fn locate_svn() -> Result<SvnInstallation, String> {
     let mut candidates = Vec::new();
     if let Some(value) = std::env::var_os("SVN_SCOPE_SVN_EXE") {
         candidates.push(PathBuf::from(value));
@@ -417,12 +489,13 @@ fn locate_svn() -> Result<PathBuf, String> {
         let mut command = Command::new(&candidate);
         command.args(["--version", "--quiet"]);
         configure_no_window(&mut command);
-        if command
-            .output()
-            .map(|output| output.status.success())
-            .unwrap_or(false)
-        {
-            return Ok(candidate);
+        if let Ok(output) = command.output() {
+            if output.status.success() {
+                return Ok(SvnInstallation {
+                    executable: candidate,
+                    version: String::from_utf8_lossy(&output.stdout).trim().to_owned(),
+                });
+            }
         }
     }
 
@@ -551,7 +624,26 @@ mod tests {
         assert_eq!(changes.len(), 2);
         assert_eq!(changes[0].relative_path, "main.ts");
         assert_eq!(changes[0].status_code, "M");
+        assert_eq!(changes[0].base_revision.as_deref(), Some("7"));
         assert_eq!(changes[1].status_code, "?");
+        assert_eq!(changes[1].base_revision, None);
+    }
+
+    #[test]
+    fn infers_changed_directory_from_descendant_paths() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<status>
+  <target path="C:\work\demo\src">
+    <entry path="C:\work\demo\src\removed"><wc-status item="deleted" revision="7" props="none" /></entry>
+    <entry path="C:\work\demo\src\removed\child.txt"><wc-status item="deleted" revision="7" props="none" /></entry>
+  </target>
+</status>"#;
+        let changes = parse_status_xml(xml, Path::new(r"C:\work\demo\src")).unwrap();
+        let directory = changes
+            .iter()
+            .find(|change| change.relative_path == "removed")
+            .unwrap();
+        assert!(directory.is_directory);
     }
 
     #[test]
@@ -560,6 +652,7 @@ mod tests {
             item: "normal".to_owned(),
             props: "modified".to_owned(),
             tree_conflicted: false,
+            revision: Some("7".to_owned()),
         };
         assert!(is_interesting(&status));
         assert_eq!(status_code(&status), "M");
@@ -608,9 +701,14 @@ mod tests {
         );
 
         let selected = working_copy.join("src");
+        let removed_directory = selected.join("removed-dir");
+        let missing_file = selected.join("missing.txt");
         fs::create_dir_all(&selected).unwrap();
+        fs::create_dir_all(&removed_directory).unwrap();
         fs::write(working_copy.join("parent.txt"), "parent base\n").unwrap();
         fs::write(selected.join("child.txt"), "child base\n").unwrap();
+        fs::write(&missing_file, "missing base\n").unwrap();
+        fs::write(removed_directory.join("nested.txt"), "removed base\n").unwrap();
         run_checked(
             Command::new("svn")
                 .arg("add")
@@ -627,30 +725,59 @@ mod tests {
         fs::write(working_copy.join("parent.txt"), "parent changed\n").unwrap();
         fs::write(selected.join("child.txt"), "child changed\n").unwrap();
         fs::write(selected.join("new.txt"), "new file\n").unwrap();
+        run_checked(
+            Command::new("svn")
+                .arg("propset")
+                .arg("perf")
+                .arg("yes")
+                .arg(selected.join("child.txt")),
+        );
+        run_checked(Command::new("svn").arg("delete").arg(&removed_directory));
+        fs::remove_file(&missing_file).unwrap();
 
-        let result = scan(
-            selected.to_str().unwrap(),
-            ToolAvailability {
-                available: false,
-                path: None,
-            },
-        )
-        .unwrap();
+        let result = scan(selected.to_str().unwrap()).unwrap();
         let paths: Vec<&str> = result
             .changes
             .iter()
             .map(|change| change.relative_path.as_str())
             .collect();
-        assert_eq!(paths, vec!["child.txt", "new.txt"]);
+        assert!(paths.contains(&"child.txt"));
+        assert!(paths.contains(&"new.txt"));
+        assert!(!paths.contains(&"../parent.txt"));
 
         let child = result
             .changes
             .iter()
             .find(|change| change.relative_path == "child.txt")
             .unwrap();
-        let diff = file_diff(&child.path, &child.item, &child.properties).unwrap();
+        assert_eq!(child.base_revision.as_deref(), Some("2"));
+        let diff = file_diff(
+            &child.path,
+            &child.item,
+            child.is_directory,
+            child.base_revision.as_deref(),
+        )
+        .unwrap();
         assert_eq!(diff.original, "child base\n");
         assert_eq!(diff.modified, "child changed\n");
+        assert_eq!(diff.original_label, "BASE · r2");
+
+        let properties = property_diff(&child.path).unwrap().unwrap();
+        assert!(properties.contains("perf"));
+
+        let removed = result
+            .changes
+            .iter()
+            .find(|change| change.relative_path == "removed-dir")
+            .unwrap();
+        assert!(removed.is_directory);
+
+        let missing = result
+            .changes
+            .iter()
+            .find(|change| change.relative_path == "missing.txt")
+            .unwrap();
+        assert!(!missing.is_directory);
     }
 
     fn run_checked(command: &mut Command) {

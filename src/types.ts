@@ -7,6 +7,7 @@ export interface ChangeEntry {
   statusCode: string;
   isDirectory: boolean;
   treeConflicted: boolean;
+  baseRevision: string | null;
 }
 
 export interface ToolAvailability {
@@ -17,11 +18,9 @@ export interface ToolAvailability {
 export interface ScanResult {
   directory: string;
   wcRoot: string;
-  repositoryUrl: string | null;
   revision: string | null;
   svnVersion: string;
   changes: ChangeEntry[];
-  beyondCompare: ToolAvailability;
 }
 
 export interface DiffResult {
@@ -38,7 +37,6 @@ export interface DiffResult {
   isDirectory: boolean;
   truncated: boolean;
   note: string | null;
-  propertyDiff: string | null;
 }
 
 export interface TreeNode {

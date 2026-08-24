@@ -12,6 +12,11 @@ interface DiffPaneProps {
   beyondCompareAvailable: boolean;
   beyondComparePath?: string | null;
   onOpenBeyondCompare: () => void;
+  propertyDiff?: string | null;
+  propertyDiffLoading: boolean;
+  propertyDiffLoaded: boolean;
+  propertyDiffError?: string;
+  onLoadPropertyDiff: () => void;
 }
 
 type DiffViewMode = "diff" | "all";
@@ -102,6 +107,11 @@ export function DiffPane({
   beyondCompareAvailable,
   beyondComparePath,
   onOpenBeyondCompare,
+  propertyDiff,
+  propertyDiffLoading,
+  propertyDiffLoaded,
+  propertyDiffError,
+  onLoadPropertyDiff,
 }: DiffPaneProps) {
   const [viewMode, setViewMode] = useState<DiffViewMode>("all");
   const viewModeRef = useRef<DiffViewMode>(viewMode);
@@ -289,10 +299,25 @@ export function DiffPane({
             </div>
           )}
 
-          {diff.propertyDiff && (
-            <details className="property-diff">
+          {(selected.properties === "modified" || selected.properties === "conflicted") && (
+            <details
+              className="property-diff"
+              onToggle={(event) => {
+                if (event.currentTarget.open) onLoadPropertyDiff();
+              }}
+            >
               <summary>SVN 属性差异</summary>
-              <pre>{diff.propertyDiff}</pre>
+              {propertyDiffLoading ? (
+                <div className="property-diff-message">
+                  <span className="spinner" /> 正在读取属性差异…
+                </div>
+              ) : propertyDiffError ? (
+                <div className="property-diff-message error">{propertyDiffError}</div>
+              ) : propertyDiffLoaded ? (
+                propertyDiff ? <pre>{propertyDiff}</pre> : <div className="property-diff-message">没有可显示的属性差异。</div>
+              ) : (
+                <div className="property-diff-message">展开后读取属性差异。</div>
+              )}
             </details>
           )}
 

@@ -12,6 +12,7 @@
 - 完全本地的 Monaco 并排 diff；编辑器资源随 EXE 打包，不依赖 CDN。
 - diff 顶部右侧可直接在“差异 / 全部”间切换：“差异”折叠长段未修改内容，“全部”显示完整文件。
 - 左侧变更区和右侧 diff 各自独立滚动；diff 滑块尺寸及位置由 Monaco 按实际内容自动计算。
+- 扫描合并 SVN 元数据查询并缓存工具探测；文本 diff 复用扫描得到的文件类型与 BASE revision，属性差异仅在展开时读取。
 - UTF-8、UTF-8 BOM、UTF-16、GBK 文本解码；二进制和超大文件有明确提示。
 - Beyond Compare 4/5 可选集成：自动发现常见安装位置，用 SVN `BASE` 快照和工作文件启动外部比较，左侧只读。
 - 当前用户级资源管理器右键菜单：既支持右键文件夹，也支持文件夹背景；无需管理员。
@@ -25,6 +26,7 @@ Beyond Compare 提供的是独立桌面应用和命令行入口，并没有适�
 2. 检测到 Beyond Compare 后显示按钮，按其官方命令行格式启动两个文件：左侧是 `svn cat -r BASE` 生成的临时快照，右侧是工作文件，并传入 `/leftreadonly` 与标题参数。
 
 这样不需要复制、破解或重新分发 Beyond Compare，也不会把它变成本工具的硬依赖。Beyond Compare 的许可证由使用者自行负责。
+工具位置按应用进程缓存；如果在 SVN Scope 运行期间安装 Beyond Compare 或修改其路径环境变量，请重启 SVN Scope。
 
 ## 本地开发
 
@@ -75,14 +77,14 @@ npm run portable
 
 ```text
 dist-portable\
-├─ SVN Scope 0.1.3\
+├─ SVN Scope 0.1.4\
 │  ├─ SVN Scope.exe
 │  ├─ Register-ContextMenu.cmd
 │  ├─ Unregister-ContextMenu.cmd
 │  ├─ 对应 PowerShell 脚本
 │  ├─ README-便携版.txt
 │  └─ SHA256SUMS.txt
-└─ SVN-Scope-0.1.3-win-x64.zip
+└─ SVN-Scope-0.1.4-win-x64.zip
 ```
 
 首次构建会下载 npm/crates.io 依赖；之后是纯本机构建。产物不包含安装器、自动更新器、遥测或云服务。

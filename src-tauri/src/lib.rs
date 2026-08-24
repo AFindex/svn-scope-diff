@@ -2,7 +2,7 @@ mod beyond_compare;
 mod models;
 mod svn;
 
-use models::{DiffResult, ScanResult};
+use models::{DiffResult, ScanResult, ToolAvailability};
 use std::path::PathBuf;
 
 struct LaunchDirectory(Option<String>);
@@ -14,23 +14,37 @@ fn get_launch_directory(state: tauri::State<'_, LaunchDirectory>) -> Option<Stri
 
 #[tauri::command]
 async fn scan_changes(directory: String) -> Result<ScanResult, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let beyond_compare = beyond_compare::availability();
-        svn::scan(&directory, beyond_compare)
-    })
-    .await
-    .map_err(|error| format!("扫描任务异常结束：{error}"))?
+    tauri::async_runtime::spawn_blocking(move || svn::scan(&directory))
+        .await
+        .map_err(|error| format!("扫描任务异常结束：{error}"))?
+}
+
+#[tauri::command]
+async fn get_beyond_compare_availability() -> Result<ToolAvailability, String> {
+    tauri::async_runtime::spawn_blocking(beyond_compare::availability)
+        .await
+        .map_err(|error| format!("工具检测任务异常结束：{error}"))
 }
 
 #[tauri::command]
 async fn get_file_diff(
     path: String,
     item: String,
-    properties: String,
+    is_directory: bool,
+    base_revision: Option<String>,
 ) -> Result<DiffResult, String> {
-    tauri::async_runtime::spawn_blocking(move || svn::file_diff(&path, &item, &properties))
+    tauri::async_runtime::spawn_blocking(move || {
+        svn::file_diff(&path, &item, is_directory, base_revision.as_deref())
+    })
+    .await
+    .map_err(|error| format!("diff 任务异常结束：{error}"))?
+}
+
+#[tauri::command]
+async fn get_property_diff(path: String) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || svn::property_diff(&path))
         .await
-        .map_err(|error| format!("diff 任务异常结束：{error}"))?
+        .map_err(|error| format!("属性 diff 任务异常结束：{error}"))?
 }
 
 #[tauri::command]
@@ -62,7 +76,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_launch_directory,
             scan_changes,
+            get_beyond_compare_availability,
             get_file_diff,
+            get_property_diff,
             open_in_beyond_compare
         ])
         .run(tauri::generate_context!())
