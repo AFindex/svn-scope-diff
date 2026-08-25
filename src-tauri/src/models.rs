@@ -23,6 +23,22 @@ pub struct ToolAvailability {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct TortoiseSvnAvailability {
+    pub available: bool,
+    pub path: Option<String>,
+    pub auto_select_files: bool,
+    pub show_unversioned: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitLaunchResult {
+    pub selected_count: usize,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ScanResult {
     pub directory: String,
     pub wc_root: String,

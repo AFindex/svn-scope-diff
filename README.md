@@ -9,6 +9,10 @@
 - 指定目录范围内递归扫描；使用 `svn status --xml --depth infinity <目录>`，不会扫描父目录。
 - 文件树展示 `M / A / D / R / C / ! / U / ~`，其中 `U` 表示未版本化；内部仍保留 SVN 原始状态码 `?`。
 - 左侧可在“层级 / 列表”间切换；列表支持按相对路径、文件名、所在目录、修改状态、扩展名排序，并可切换升降序。筛选区可在“文本 / 后缀”间切换：文本支持文件名与相对路径空格分词，后缀选项按当前修改动态生成并显示数量，包含目录与无后缀类型。
+- 列表和层级模式都有独立的提交复选框；选择热区为 28×28，层级目录使用全选/半选/未选三态。待提交选择采用浅色描边与蓝色文件名，当前 Diff 文件则使用更强的左侧蓝条，二者不会混淆。选择状态跨显示模式、排序和筛选保留，并支持“全选当前筛选”“取消当前”和“清空”。
+- 左侧修改区和右侧 Diff 之间有可拖动分隔条；宽度限制会为 Diff 保留可用空间，支持方向键微调、Shift 加速、Home/End 边界、双击复位，并在本机记住上次宽度。拖动过程直接更新网格宽度，避免让 Monaco 高频重渲染。
+- 左侧“用 TortoiseSVN 提交”把勾选项作为具体路径转交给小乌龟 Commit 窗口；大量路径使用 UTF-16LE、无 BOM、LF 分隔的临时 `/pathfile`，完成后由 `/deletepathfile` 清理。未版本化目录不会直接转交，避免意外递归加入未知文件。
+- 顶部“刷新变更”（Ctrl+R）重新扫描当前打开目录；保留仍有效的当前 Diff 文件和提交选择，已恢复干净或消失的条目会从选择中移除。
 - 完全本地的 Monaco 并排 diff；编辑器资源随 EXE 打包，不依赖 CDN。
 - diff 顶部右侧可直接在“差异 / 全部”间切换：“差异”折叠长段未修改内容，“全部”显示完整文件。
 - 左侧变更区和右侧 diff 各自独立滚动；右侧启用 Monaco Diff Overview Ruler，以红/绿标记展示整份文件中的删除与新增，当前视口可点击或拖动定位；普通滚动条保持独立细尺寸。
@@ -31,6 +35,16 @@ Beyond Compare 提供的是独立桌面应用和命令行入口，并没有适�
 这样不需要复制、破解或重新分发 Beyond Compare，也不会把它变成本工具的硬依赖。Beyond Compare 的许可证由使用者自行负责。
 工具位置按应用进程缓存；如果在 SVN Scope 运行期间安装 Beyond Compare 或修改其路径环境变量，请重启 SVN Scope。
 
+## TortoiseSVN 提交集成
+
+安装 TortoiseSVN 后，SVN Scope 会从注册表、标准安装目录、便携目录和 PATH 查找 `TortoiseProc.exe`。也可以显式指定：
+
+```powershell
+$env:SVN_SCOPE_TORTOISEPROC_EXE = 'D:\Tools\TortoiseSVN\bin\TortoiseProc.exe'
+```
+
+提交按钮只负责打开小乌龟的标准 Commit 窗口，不会绕过确认或直接提交。TortoiseSVN 默认开启“Select items automatically”，因此传入的文件会预先勾选；如果用户关闭该设置，SVN Scope 会显示提示但不会擅自修改注册表。真实目录变更可能让 TortoiseSVN 展开目录，界面会提醒在提交窗口中复核；未版本化目录则明确禁止直接转交。
+
 ## 本地开发
 
 ### 前置条件
@@ -41,6 +55,7 @@ Beyond Compare 提供的是独立桌面应用和命令行入口，并没有适�
 - Visual Studio 2022 C++ Build Tools（勾选“使用 C++ 的桌面开发”）
 - Microsoft Edge WebView2 Runtime（Windows 10/11 通常已安装）
 - SVN 命令行客户端 1.9+；TortoiseSVN 安装时可勾选 command line client tools
+- TortoiseSVN 1.14+（可选，仅“用 TortoiseSVN 提交”功能需要）
 
 如果 `svn.exe` 不在 PATH，本工具也会检查 TortoiseSVN、SlikSVN 的常见路径。还可以设置：
 
@@ -57,7 +72,7 @@ $env:SVN_SCOPE_BCOMPARE_EXE = 'D:\Tools\Beyond Compare 5\BCompare.exe'
 ### 调试运行
 
 ```powershell
-cd F:\my_work\ai-playground\svn-scope-diff
+cd .\svn-scope-diff
 npm ci
 npm run desktop:dev
 ```
@@ -80,14 +95,14 @@ npm run portable
 
 ```text
 dist-portable\
-├─ SVN Scope 0.1.7\
+├─ SVN Scope 0.1.10\
 │  ├─ SVN Scope.exe
 │  ├─ Register-ContextMenu.cmd
 │  ├─ Unregister-ContextMenu.cmd
 │  ├─ 对应 PowerShell 脚本
 │  ├─ README-便携版.txt
 │  └─ SHA256SUMS.txt
-└─ SVN-Scope-0.1.7-win-x64.zip
+└─ SVN-Scope-0.1.10-win-x64.zip
 ```
 
 首次构建会下载 npm/crates.io 依赖；之后是纯本机构建。产物不包含安装器、自动更新器、遥测或云服务。
@@ -113,6 +128,7 @@ dist-portable\
 
 - 右键菜单使用无需安装/打包身份的经典 Shell 注册方式；Windows 11 通常把它放在“显示更多选项”。要进入新版一级菜单需要实现并注册 `IExplorerCommand`/稀疏包，这与纯便携目标冲突。
 - 未版本化目录由 SVN 作为一个目录项返回，不主动遍历其内部文件，以遵守 SVN ignore 规则。
+- 未版本化目录不会被直接转交给 TortoiseSVN；请先在工作副本中明确执行 SVN Add，或选择具体的未版本化文件。真实目录变更在提交窗口中可能展开子项，需要最终复核。
 - 未签名的 EXE 若从互联网下载，Windows SmartScreen 可能提示未知发布者；本地构建不影响运行。
 - 便携 EXE 使用系统 WebView2 Runtime，不携带体积很大的 Fixed Version Runtime。
 

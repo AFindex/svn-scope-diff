@@ -1,8 +1,10 @@
 import { useMemo } from "react";
 import { directoryOf, extensionLabel, extensionOf } from "../changeFilters";
+import { commitPathKey, isCommitSelectable } from "../commitSelection";
 import { displayStatusCode } from "../status";
 import type { ChangeEntry } from "../types";
 import { Icon } from "./Icons";
+import { SelectionCheckbox } from "./SelectionCheckbox";
 
 export type ChangeListSortKey = "path" | "name" | "directory" | "status" | "extension";
 export type SortDirection = "asc" | "desc";
@@ -12,9 +14,11 @@ interface ChangeListProps {
   totalCount: number;
   emptyMessage: string;
   selectedPath?: string;
+  selectedCommitPaths: ReadonlySet<string>;
   sortKey: ChangeListSortKey;
   direction: SortDirection;
   onSelect: (change: ChangeEntry) => void;
+  onToggleCommitSelection: (changes: ChangeEntry[], checked: boolean) => void;
 }
 
 const statusOrder: Record<string, number> = {
@@ -34,9 +38,11 @@ export function ChangeList({
   totalCount,
   emptyMessage,
   selectedPath,
+  selectedCommitPaths,
   sortKey,
   direction,
   onSelect,
+  onToggleCommitSelection,
 }: ChangeListProps) {
   const rows = useMemo(() => {
     const sorted = [...changes];
@@ -67,27 +73,42 @@ export function ChangeList({
       {rows.map((change) => {
         const directory = directoryOf(change);
         const extension = extensionLabel(extensionOf(change));
+        const commitSelectable = isCommitSelectable(change);
+        const commitSelected = selectedCommitPaths.has(commitPathKey(change.path));
         return (
-          <button
+          <div
             key={change.path}
-            type="button"
             role="listitem"
-            className={`change-list-row ${change.path === selectedPath ? "selected" : ""}`}
+            className={`change-list-row ${change.path === selectedPath ? "selected" : ""} ${commitSelected ? "commit-selected" : ""}`}
             title={`${change.relativePath} · ${change.item}`}
-            onClick={() => onSelect(change)}
           >
-            <span className="status-badge" data-status={change.statusCode}>
-              {displayStatusCode(change.statusCode)}
-            </span>
-            <span className={`list-kind ${change.isDirectory ? "folder" : "file"}`}>
-              <Icon name={change.isDirectory ? "folder" : "file"} size={16} />
-            </span>
-            <span className="list-file-info">
-              <span className="list-file-name">{change.name}</span>
-              <span className="list-file-path">{directory === "." ? change.relativePath : directory}</span>
-            </span>
-            <span className="list-extension">{extension}</span>
-          </button>
+            <SelectionCheckbox
+              state={commitSelected ? "all" : "none"}
+              disabled={!commitSelectable}
+              label={`选择提交 ${change.relativePath}`}
+              title={commitSelectable
+                ? `将 ${change.relativePath} 加入提交选择`
+                : "未版本化目录不会直接转交，避免 TortoiseSVN 递归加入未知文件"}
+              onChange={(checked) => onToggleCommitSelection([change], checked)}
+            />
+            <button
+              type="button"
+              className="change-list-open"
+              onClick={() => onSelect(change)}
+            >
+              <span className="status-badge" data-status={change.statusCode}>
+                {displayStatusCode(change.statusCode)}
+              </span>
+              <span className={`list-kind ${change.isDirectory ? "folder" : "file"}`}>
+                <Icon name={change.isDirectory ? "folder" : "file"} size={16} />
+              </span>
+              <span className="list-file-info">
+                <span className="list-file-name">{change.name}</span>
+                <span className="list-file-path">{directory === "." ? change.relativePath : directory}</span>
+              </span>
+              <span className="list-extension">{extension}</span>
+            </button>
+          </div>
         );
       })}
     </div>

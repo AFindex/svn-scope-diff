@@ -6,8 +6,13 @@ import {
   filterChanges,
   type ListFilterMode,
 } from "../changeFilters";
+import {
+  commitPathKey,
+  isCommitSelectable,
+  selectedCommitChanges,
+} from "../commitSelection";
 import { displayStatusCode } from "../status";
-import type { ChangeEntry } from "../types";
+import type { ChangeEntry, TortoiseSvnAvailability } from "../types";
 import { ChangeList, type ChangeListSortKey, type SortDirection } from "./ChangeList";
 import { ChangeTree } from "./ChangeTree";
 import { Icon } from "./Icons";
@@ -15,12 +20,18 @@ import { Icon } from "./Icons";
 interface ChangesPanelProps {
   changes: ChangeEntry[];
   selectedPath?: string;
+  selectedCommitPaths: ReadonlySet<string>;
+  tortoiseSvn?: TortoiseSvnAvailability;
+  commitLaunching: boolean;
   textDiffCount: number;
   bulkDiffProgress?: {
     completed: number;
     total: number;
   };
   onSelect: (change: ChangeEntry) => void;
+  onToggleCommitSelection: (changes: ChangeEntry[], checked: boolean) => void;
+  onClearCommitSelection: () => void;
+  onCommitSelection: () => void;
   onUpdateAllTextDiffs: () => void;
 }
 
@@ -61,9 +72,15 @@ function SearchField({ value, placeholder, ariaLabel, className = "", onChange }
 export function ChangesPanel({
   changes,
   selectedPath,
+  selectedCommitPaths,
+  tortoiseSvn,
+  commitLaunching,
   textDiffCount,
   bulkDiffProgress,
   onSelect,
+  onToggleCommitSelection,
+  onClearCommitSelection,
+  onCommitSelection,
   onUpdateAllTextDiffs,
 }: ChangesPanelProps) {
   const [treeQuery, setTreeQuery] = useState("");
@@ -79,6 +96,34 @@ export function ChangesPanel({
     () => filterChanges(changes, listFilterMode, listTextFilter, listExtensionFilter),
     [changes, listExtensionFilter, listFilterMode, listTextFilter],
   );
+  const filteredTreeChanges = useMemo(() => {
+    const normalized = treeQuery.trim().toLocaleLowerCase();
+    if (!normalized) return changes;
+    return changes.filter((change) => change.relativePath.toLocaleLowerCase().includes(normalized));
+  }, [changes, treeQuery]);
+  const visibleChanges = changeView === "tree" ? filteredTreeChanges : filteredListChanges;
+  const visibleCommitChanges = useMemo(
+    () => visibleChanges.filter(isCommitSelectable),
+    [visibleChanges],
+  );
+  const commitChanges = useMemo(
+    () => selectedCommitChanges(changes, selectedCommitPaths),
+    [changes, selectedCommitPaths],
+  );
+  const allVisibleSelected = Boolean(visibleCommitChanges.length) && visibleCommitChanges.every(
+    (change) => selectedCommitPaths.has(commitPathKey(change.path)),
+  );
+  const selectedDirectoryCount = commitChanges.filter((change) => change.isDirectory).length;
+  const selectedUnversionedCount = commitChanges.filter((change) => change.item === "unversioned").length;
+
+  let commitNotice: string | undefined;
+  if (tortoiseSvn && !tortoiseSvn.autoSelectFiles) {
+    commitNotice = "TortoiseSVN 已关闭自动选择提交项，打开后可能不会自动勾选。";
+  } else if (tortoiseSvn && !tortoiseSvn.showUnversioned && selectedUnversionedCount) {
+    commitNotice = `TortoiseSVN 已隐藏未版本化项，所选 ${selectedUnversionedCount} 项可能不会显示。`;
+  } else if (selectedDirectoryCount) {
+    commitNotice = `包含 ${selectedDirectoryCount} 个目录变更；TortoiseSVN 可能展开目录，请在提交窗口复核。`;
+  }
 
   useEffect(() => {
     if (
@@ -234,6 +279,63 @@ export function ChangesPanel({
         </div>
       )}
 
+      <div className="commit-selection-panel">
+        <div className="commit-selection-summary">
+          <span className="commit-selection-count">
+            提交选择
+            <b>{commitChanges.length}</b>
+          </span>
+          <div className="commit-selection-actions">
+            <button
+              type="button"
+              disabled={!visibleCommitChanges.length}
+              title={`${allVisibleSelected ? "取消选择" : "选择"}当前视图中的 ${visibleCommitChanges.length} 个可提交变更`}
+              onClick={() => onToggleCommitSelection(visibleCommitChanges, !allVisibleSelected)}
+            >
+              {allVisibleSelected ? "取消当前" : "全选当前"}
+            </button>
+            <button
+              type="button"
+              disabled={!commitChanges.length}
+              onClick={onClearCommitSelection}
+            >
+              清空
+            </button>
+          </div>
+        </div>
+        <button
+          type="button"
+          className="tortoise-commit-button"
+          disabled={!commitChanges.length || !tortoiseSvn?.available || commitLaunching}
+          title={!tortoiseSvn
+            ? "正在检测 TortoiseSVN"
+            : !tortoiseSvn.available
+              ? "未检测到 TortoiseProc.exe"
+              : commitChanges.length
+                ? `把选中的 ${commitChanges.length} 项修改交给 TortoiseSVN 提交窗口`
+                : "请先勾选要提交的修改"}
+          onClick={onCommitSelection}
+        >
+          <Icon name="commit" size={15} className={commitLaunching ? "commit-launching" : undefined} />
+          <span>
+            {commitLaunching
+              ? "正在打开 TortoiseSVN…"
+              : !tortoiseSvn
+                ? "正在检测 TortoiseSVN"
+                : !tortoiseSvn.available
+                  ? "未检测到 TortoiseSVN"
+                  : "用 TortoiseSVN 提交"}
+          </span>
+          <b>{commitChanges.length}</b>
+        </button>
+        {commitNotice && (
+          <div className="commit-selection-notice" role="status">
+            <Icon name="warning" size={12} />
+            <span>{commitNotice}</span>
+          </div>
+        )}
+      </div>
+
       <div className="bulk-diff-toolbar">
           <button
             type="button"
@@ -271,8 +373,10 @@ export function ChangesPanel({
             <ChangeTree
               changes={changes}
               selectedPath={selectedPath}
+              selectedCommitPaths={selectedCommitPaths}
               query={treeQuery}
               onSelect={onSelect}
+              onToggleCommitSelection={onToggleCommitSelection}
             />
           ) : (
             <ChangeList
@@ -280,9 +384,11 @@ export function ChangesPanel({
               totalCount={changes.length}
               emptyMessage={listEmptyMessage}
               selectedPath={selectedPath}
+              selectedCommitPaths={selectedCommitPaths}
               sortKey={listSortKey}
               direction={sortDirection}
               onSelect={onSelect}
+              onToggleCommitSelection={onToggleCommitSelection}
             />
           )
         ) : (

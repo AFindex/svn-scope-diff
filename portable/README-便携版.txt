@@ -1,4 +1,4 @@
-SVN Scope 0.1.7（Windows x64 便携版）
+SVN Scope 0.1.10（Windows x64 便携版）
 ====================================
 
 直接运行：
@@ -20,9 +20,12 @@ Windows 11：
   1. Windows 10/11 与 Microsoft Edge WebView2 Runtime（通常系统已自带）。
   2. svn.exe：支持 PATH、TortoiseSVN/SlikSVN 常见安装位置，或环境变量
      SVN_SCOPE_SVN_EXE 指定的完整路径。
-  3. Beyond Compare 4/5 为可选项，需自行持有许可证；没有它也能使用内嵌 diff。
+  3. TortoiseSVN 为可选项；安装后可把左侧勾选的修改直接转交给小乌龟提交窗口。
+  4. Beyond Compare 4/5 为可选项，需自行持有许可证；没有它也能使用内嵌 diff。
 
 本工具不联网：状态来自本地 working copy，BASE 内容来自 SVN pristine storage。
 重复查看未更新的文件会直接使用内存 Diff 缓存；当前文件在磁盘上更新时会提示是否重新加载。
 左侧“更新全部文本 Diff”可一次预热常见代码文本后缀，并显示处理进度。
 列表模式支持按文件名/路径文本或动态后缀类型筛选；右侧 Diff 带可点击的红绿总览条。
+列表和层级模式共用提交复选状态；顶部“刷新变更”会重新扫描当前目录并保留仍有效的选择。
+左右区域之间的分隔条可拖动调整宽度；方向键可微调，双击恢复默认宽度。

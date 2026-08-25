@@ -15,6 +15,16 @@ export interface ToolAvailability {
   path: string | null;
 }
 
+export interface TortoiseSvnAvailability extends ToolAvailability {
+  autoSelectFiles: boolean;
+  showUnversioned: boolean;
+}
+
+export interface CommitLaunchResult {
+  selectedCount: number;
+  message: string;
+}
+
 export interface ScanResult {
   directory: string;
   wcRoot: string;
@@ -51,5 +61,6 @@ export interface TreeNode {
   name: string;
   isFolder: boolean;
   children: TreeNode[];
+  selectableChanges: ChangeEntry[];
   change?: ChangeEntry;
 }

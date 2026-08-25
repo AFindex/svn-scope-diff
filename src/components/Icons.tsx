@@ -18,6 +18,7 @@ type IconName =
   | "list"
   | "sortAsc"
   | "sortDesc"
+  | "commit"
   | "close";
 
 interface IconProps extends SVGProps<SVGSVGElement> {
@@ -134,6 +135,13 @@ export function Icon({ name, size = 16, ...props }: IconProps) {
     sortDesc: (
       <>
         <path d="M8 5v13M4.5 14.5 8 18l3.5-3.5M14 7h3M14 12h4.5M14 17h6" />
+      </>
+    ),
+    commit: (
+      <>
+        <path d="M12 3v11M8 10l4 4 4-4" />
+        <path d="M5 14v5h14v-5" />
+        <path d="M8 19v-2h8v2" />
       </>
     ),
     close: <path d="m6 6 12 12M18 6 6 18" />,

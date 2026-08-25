@@ -1,18 +1,45 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import type {
   ChangeEntry,
+  CommitLaunchResult,
   DiffResult,
   FileFingerprint,
   ScanResult,
   ToolAvailability,
+  TortoiseSvnAvailability,
 } from "./types";
 import { ChangesPanel } from "./components/ChangesPanel";
 import { DiffPane } from "./components/DiffPane";
 import { Icon } from "./components/Icons";
 import { DiffCache, sameFingerprint } from "./diffCache";
 import { textDiffChanges } from "./textDiffFiles";
+import {
+  ancestorDirectorySelectionKeys,
+  expandCommitSelectionKeys,
+  reconcileCommitSelection,
+  selectedCommitChanges,
+} from "./commitSelection";
+import {
+  DEFAULT_SIDEBAR_WIDTH,
+  MAX_SIDEBAR_WIDTH,
+  MIN_DIFF_WIDTH,
+  MIN_SIDEBAR_WIDTH,
+  SIDEBAR_RESIZE_HANDLE_WIDTH,
+  clampSidebarWidth,
+  sidebarMaxWidth,
+  sidebarWidthFromKey,
+} from "./sidebarResize";
 
 function errorMessage(error: unknown) {
   if (typeof error === "string") return error;
@@ -57,6 +84,25 @@ interface BulkDiffCounters {
 const DIFF_CACHE_LIMIT = 12;
 const FILE_CHECK_INTERVAL_MS = 1500;
 const BULK_DIFF_CONCURRENCY = 3;
+const SIDEBAR_WIDTH_STORAGE_KEY = "svn-scope.sidebar-width";
+
+function currentViewportWidth() {
+  return Math.max(
+    window.innerWidth,
+    MIN_SIDEBAR_WIDTH + MIN_DIFF_WIDTH + SIDEBAR_RESIZE_HANDLE_WIDTH,
+  );
+}
+
+function initialSidebarWidth() {
+  let storedWidth = DEFAULT_SIDEBAR_WIDTH;
+  try {
+    const value = Number.parseFloat(window.localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY) ?? "");
+    if (Number.isFinite(value)) storedWidth = value;
+  } catch {
+    // A disabled localStorage should not prevent the desktop UI from loading.
+  }
+  return clampSidebarWidth(storedWidth, currentViewportWidth());
+}
 
 function normalizedPath(path: string) {
   return path.replace(/[\\/]+$/, "").toLowerCase();
@@ -90,6 +136,11 @@ export default function App() {
   const [fileReloading, setFileReloading] = useState(false);
   const [fileReloadError, setFileReloadError] = useState<string>();
   const [bulkDiffProgress, setBulkDiffProgress] = useState<BulkDiffProgress>();
+  const [commitSelection, setCommitSelection] = useState<Set<string>>(() => new Set());
+  const [tortoiseSvn, setTortoiseSvn] = useState<TortoiseSvnAvailability>();
+  const [commitLaunching, setCommitLaunching] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(initialSidebarWidth);
+  const [sidebarResizing, setSidebarResizing] = useState(false);
   const diffCacheRef = useRef(new DiffCache(DIFF_CACHE_LIMIT));
   const selectedRef = useRef<ChangeEntry | undefined>(undefined);
   const watchBaselineRef = useRef<{ path: string; fingerprint: FileFingerprint } | undefined>(undefined);
@@ -97,11 +148,97 @@ export default function App() {
   const bulkDiffRunRef = useRef(0);
   const bulkDiffRunningRef = useRef(false);
   const activeScanDirectoryRef = useRef<string | undefined>(undefined);
+  const workspaceRef = useRef<HTMLDivElement | null>(null);
+  const sidebarWidthRef = useRef(sidebarWidth);
+  const sidebarDragRef = useRef<{
+    pointerId: number;
+    startX: number;
+    startWidth: number;
+  } | undefined>(undefined);
   const eligibleTextChanges = useMemo(() => textDiffChanges(scan?.changes ?? []), [scan?.changes]);
+  const commitChanges = useMemo(
+    () => selectedCommitChanges(scan?.changes ?? [], commitSelection),
+    [commitSelection, scan?.changes],
+  );
 
   useEffect(() => {
     selectedRef.current = selected;
   }, [selected]);
+
+  const previewSidebarWidth = useCallback((width: number) => {
+    const nextWidth = clampSidebarWidth(width, currentViewportWidth());
+    sidebarWidthRef.current = nextWidth;
+    workspaceRef.current?.style.setProperty("--sidebar-width", `${nextWidth}px`);
+    return nextWidth;
+  }, []);
+
+  const applySidebarWidth = useCallback((width: number) => {
+    const nextWidth = previewSidebarWidth(width);
+    setSidebarWidth(nextWidth);
+    return nextWidth;
+  }, [previewSidebarWidth]);
+
+  const persistSidebarWidth = useCallback((width: number) => {
+    try {
+      window.localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(width));
+    } catch {
+      // Resizing still works for this session when storage is unavailable.
+    }
+  }, []);
+
+  useEffect(() => {
+    const onWindowResize = () => applySidebarWidth(sidebarWidthRef.current);
+    window.addEventListener("resize", onWindowResize);
+    return () => window.removeEventListener("resize", onWindowResize);
+  }, [applySidebarWidth]);
+
+  const beginSidebarResize = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    sidebarDragRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startWidth: sidebarWidthRef.current,
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setSidebarResizing(true);
+  }, []);
+
+  const moveSidebarResize = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = sidebarDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    previewSidebarWidth(drag.startWidth + event.clientX - drag.startX);
+  }, [previewSidebarWidth]);
+
+  const endSidebarResize = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = sidebarDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    sidebarDragRef.current = undefined;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    setSidebarWidth(sidebarWidthRef.current);
+    setSidebarResizing(false);
+    persistSidebarWidth(sidebarWidthRef.current);
+  }, [persistSidebarWidth]);
+
+  const resizeSidebarFromKeyboard = useCallback((event: ReactKeyboardEvent<HTMLDivElement>) => {
+    const nextWidth = sidebarWidthFromKey(
+      sidebarWidthRef.current,
+      event.key,
+      event.shiftKey,
+      currentViewportWidth(),
+    );
+    if (nextWidth === undefined) return;
+    event.preventDefault();
+    applySidebarWidth(nextWidth);
+    persistSidebarWidth(nextWidth);
+  }, [applySidebarWidth, persistSidebarWidth]);
+
+  const resetSidebarWidth = useCallback(() => {
+    const nextWidth = applySidebarWidth(DEFAULT_SIDEBAR_WIDTH);
+    persistSidebarWidth(nextWidth);
+  }, [applySidebarWidth, persistSidebarWidth]);
 
   const storeDiffCache = useCallback((change: ChangeEntry, fingerprint: FileFingerprint, result: DiffResult) => {
     diffCacheRef.current.put(change, fingerprint, result);
@@ -123,7 +260,8 @@ export default function App() {
     bulkDiffRunningRef.current = false;
     setBulkDiffProgress(undefined);
     const nextDirectory = normalizedPath(directory);
-    if (activeScanDirectoryRef.current !== nextDirectory) {
+    const directoryChanged = activeScanDirectoryRef.current !== nextDirectory;
+    if (directoryChanged) {
       activeScanDirectoryRef.current = nextDirectory;
       diffCacheRef.current.clear();
       diffCacheRef.current.setLimit(DIFF_CACHE_LIMIT);
@@ -134,6 +272,9 @@ export default function App() {
     try {
       const result = await invoke<ScanResult>("scan_changes", { directory });
       setScan(result);
+      setCommitSelection((current) => directoryChanged
+        ? new Set()
+        : reconcileCommitSelection(current, result.changes));
       setSelected((current) => {
         if (preserveSelection && current) {
           const retained = result.changes.find((change) => change.path === current.path);
@@ -145,11 +286,16 @@ export default function App() {
         setDiff(undefined);
         setDiffError(undefined);
       }
+      return result;
     } catch (error) {
       setScanError(errorMessage(error));
-      setScan(undefined);
-      setSelected(undefined);
-      setDiff(undefined);
+      if (!preserveSelection) {
+        setScan(undefined);
+        setSelected(undefined);
+        setDiff(undefined);
+        setCommitSelection(new Set());
+      }
+      return undefined;
     } finally {
       setScanLoading(false);
     }
@@ -175,6 +321,27 @@ export default function App() {
       })
       .catch(() => {
         if (active) setBeyondCompare({ available: false, path: null });
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    invoke<TortoiseSvnAvailability>("get_tortoise_svn_availability")
+      .then((availability) => {
+        if (active) setTortoiseSvn(availability);
+      })
+      .catch(() => {
+        if (active) {
+          setTortoiseSvn({
+            available: false,
+            path: null,
+            autoSelectFiles: true,
+            showUnversioned: true,
+          });
+        }
       });
     return () => {
       active = false;
@@ -527,15 +694,56 @@ export default function App() {
     }
   }, [scanDirectory]);
 
-  const refresh = useCallback(() => {
-    if (scan?.directory && !scanLoading) void scanDirectory(scan.directory, true);
+  const refresh = useCallback(async () => {
+    if (!scan?.directory || scanLoading) return;
+    const result = await scanDirectory(scan.directory, true);
+    if (result) setToast(`已刷新当前目录：${result.changes.length} 项变更`);
   }, [scan, scanDirectory, scanLoading]);
+
+  const toggleCommitSelection = useCallback((targets: ChangeEntry[], checked: boolean) => {
+    if (!scan) return;
+    const affected = expandCommitSelectionKeys(scan.changes, targets);
+    const broadDirectoryTargets = checked
+      ? new Set<string>()
+      : ancestorDirectorySelectionKeys(scan.changes, targets);
+    setCommitSelection((current) => {
+      const next = new Set(current);
+      for (const key of affected) {
+        if (checked) next.add(key);
+        else next.delete(key);
+      }
+      for (const key of broadDirectoryTargets) next.delete(key);
+      return next;
+    });
+  }, [scan]);
+
+  const clearCommitSelection = useCallback(() => {
+    setCommitSelection(new Set());
+  }, []);
+
+  const openTortoiseCommit = useCallback(async () => {
+    if (!scan || !commitChanges.length || commitLaunching) return;
+    setCommitLaunching(true);
+    setToast(undefined);
+    try {
+      const result = await invoke<CommitLaunchResult>("open_tortoise_svn_commit", {
+        paths: commitChanges.map((change) => change.path),
+        directory: scan.directory,
+        wcRoot: scan.wcRoot,
+      });
+      setToast(result.message);
+    } catch (error) {
+      setToast(errorMessage(error));
+    } finally {
+      setCommitLaunching(false);
+    }
+  }, [commitChanges, commitLaunching, scan]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.ctrlKey && event.key.toLocaleLowerCase() === "r") {
         event.preventDefault();
-        refresh();
+        void refresh();
       }
       if (event.ctrlKey && event.key.toLocaleLowerCase() === "o") {
         event.preventDefault();
@@ -571,7 +779,7 @@ export default function App() {
     : undefined;
 
   return (
-    <main className="app-shell">
+    <main className={`app-shell ${sidebarResizing ? "sidebar-resizing" : ""}`}>
       <header className="topbar">
         <div className="brand">
           <span className="brand-icon"><Icon name="app" size={19} /></span>
@@ -587,8 +795,15 @@ export default function App() {
             <Icon name="open" size={16} />
             打开目录
           </button>
-          <button type="button" className="icon-button" onClick={refresh} disabled={!scan || scanLoading} title="刷新 (Ctrl+R)">
+          <button
+            type="button"
+            className="toolbar-button refresh-toolbar-button"
+            onClick={() => void refresh()}
+            disabled={!scan || scanLoading}
+            title="重新扫描当前打开目录的本地变更 (Ctrl+R)"
+          >
             <Icon name="refresh" size={17} className={scanLoading ? "rotating" : ""} />
+            {scanLoading ? "正在刷新…" : "刷新变更"}
           </button>
         </div>
       </header>
@@ -613,7 +828,11 @@ export default function App() {
           </div>
         </section>
       ) : (
-        <div className="workspace">
+        <div
+          ref={workspaceRef}
+          className="workspace"
+          style={{ "--sidebar-width": `${sidebarWidth}px` } as CSSProperties}
+        >
           <aside className="sidebar">
             <div className="scope-block">
               <div className="scope-heading">
@@ -628,12 +847,40 @@ export default function App() {
             <ChangesPanel
               changes={scan.changes}
               selectedPath={selected?.path}
+              selectedCommitPaths={commitSelection}
+              tortoiseSvn={tortoiseSvn}
+              commitLaunching={commitLaunching}
               textDiffCount={eligibleTextChanges.length}
               bulkDiffProgress={bulkDiffProgress}
               onSelect={setSelected}
+              onToggleCommitSelection={toggleCommitSelection}
+              onClearCommitSelection={clearCommitSelection}
+              onCommitSelection={() => void openTortoiseCommit()}
               onUpdateAllTextDiffs={() => void updateAllTextDiffs()}
             />
           </aside>
+
+          <div
+            className="sidebar-resize-handle"
+            role="separator"
+            tabIndex={0}
+            aria-label="调整修改列表宽度"
+            aria-orientation="vertical"
+            aria-valuemin={MIN_SIDEBAR_WIDTH}
+            aria-valuemax={Math.min(MAX_SIDEBAR_WIDTH, sidebarMaxWidth(currentViewportWidth()))}
+            aria-valuenow={sidebarWidth}
+            aria-valuetext={`${sidebarWidth} 像素`}
+            title="拖动调整左侧宽度；双击恢复默认；方向键可微调"
+            onPointerDown={beginSidebarResize}
+            onPointerMove={moveSidebarResize}
+            onPointerUp={endSidebarResize}
+            onPointerCancel={endSidebarResize}
+            onLostPointerCapture={endSidebarResize}
+            onKeyDown={resizeSidebarFromKeyboard}
+            onDoubleClick={resetSidebarWidth}
+          >
+            <span className="sidebar-resize-grip" aria-hidden="true" />
+          </div>
 
           <div className="content">
             {scanError && <div className="scan-banner"><Icon name="warning" size={16} />{scanError}</div>}
@@ -663,6 +910,12 @@ export default function App() {
           <span className={beyondCompare?.available ? "tool-ready" : "tool-muted"}>
             <span className="tiny-dot" />
             Beyond Compare {!beyondCompare ? "检测中" : beyondCompare.available ? "可用" : "未检测到"}
+          </span>
+        )}
+        {scan && (
+          <span className={tortoiseSvn?.available ? "tool-ready" : "tool-muted"}>
+            <span className="tiny-dot" />
+            TortoiseSVN {!tortoiseSvn ? "检测中" : tortoiseSvn.available ? "可用" : "未检测到"}
           </span>
         )}
         <span>本地模式</span>

@@ -1,6 +1,6 @@
 [package]
 name = "svn-scope"
-version = "0.1.7"
+version = "0.1.10"
 description = "A focused local changes viewer for Subversion working copies"
 authors = ["SVN Scope contributors"]
 edition = "2021"
