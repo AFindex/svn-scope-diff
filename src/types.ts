@@ -8,6 +8,7 @@ export interface ChangeEntry {
   isDirectory: boolean;
   treeConflicted: boolean;
   baseRevision: string | null;
+  contextOnly?: boolean;
 }
 
 export interface ToolAvailability {
@@ -62,5 +63,6 @@ export interface TreeNode {
   isFolder: boolean;
   children: TreeNode[];
   selectableChanges: ChangeEntry[];
+  conflictCount: number;
   change?: ChangeEntry;
 }

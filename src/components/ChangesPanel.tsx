@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ALL_FILE_TYPES,
   fileTypeOptions,
@@ -10,14 +10,17 @@ import {
   isCommitSelectable,
   selectedCommitChanges,
 } from "../commitSelection";
+import type { ChangeItemAction } from "../changeItemActions";
 import { displayStatusCode } from "../status";
 import type { ChangeEntry, TortoiseSvnAvailability } from "../types";
 import { ChangeList, type ChangeListSortKey, type SortDirection } from "./ChangeList";
+import { ChangeContextMenu } from "./ChangeContextMenu";
 import { ChangeTree } from "./ChangeTree";
 import { ExtensionFilterSelect } from "./ExtensionFilterSelect";
 import { Icon } from "./Icons";
 
 interface ChangesPanelProps {
+  directory: string;
   changes: ChangeEntry[];
   selectedPath?: string;
   selectedCommitPaths: ReadonlySet<string>;
@@ -33,6 +36,7 @@ interface ChangesPanelProps {
   onClearCommitSelection: () => void;
   onCommitSelection: () => void;
   onUpdateAllTextDiffs: () => void;
+  onItemAction: (action: ChangeItemAction, change: ChangeEntry) => void;
 }
 
 function statusCounts(changes: ChangeEntry[]) {
@@ -70,6 +74,7 @@ function SearchField({ value, placeholder, ariaLabel, className = "", onChange }
 }
 
 export function ChangesPanel({
+  directory,
   changes,
   selectedPath,
   selectedCommitPaths,
@@ -82,6 +87,7 @@ export function ChangesPanel({
   onClearCommitSelection,
   onCommitSelection,
   onUpdateAllTextDiffs,
+  onItemAction,
 }: ChangesPanelProps) {
   const [treeQuery, setTreeQuery] = useState("");
   const [changeView, setChangeView] = useState<"tree" | "list">("tree");
@@ -90,6 +96,12 @@ export function ChangesPanel({
   const [listFilterMode, setListFilterMode] = useState<ListFilterMode>("text");
   const [listTextFilter, setListTextFilter] = useState("");
   const [listExtensionFilters, setListExtensionFilters] = useState<string[]>([ALL_FILE_TYPES]);
+  const [contextMenu, setContextMenu] = useState<{
+    change: ChangeEntry;
+    x: number;
+    y: number;
+    returnFocus?: HTMLElement;
+  }>();
   const counts = useMemo(() => statusCounts(changes), [changes]);
   const typeOptions = useMemo(() => fileTypeOptions(changes), [changes]);
   const filteredListChanges = useMemo(
@@ -133,6 +145,29 @@ export function ChangesPanel({
       return availableSelection.length === current.length ? current : availableSelection;
     });
   }, [typeOptions]);
+
+  useEffect(() => {
+    if (contextMenu && !changes.some((change) => change.path === contextMenu.change.path)) {
+      setContextMenu(undefined);
+    }
+  }, [changes, contextMenu]);
+
+  const openContextMenu = useCallback((
+    change: ChangeEntry,
+    x: number,
+    y: number,
+    returnFocus?: HTMLElement,
+  ) => {
+    setContextMenu({ change, x, y, returnFocus });
+  }, []);
+  const closeContextMenu = useCallback((restoreFocus = false) => {
+    setContextMenu((current) => {
+      if (restoreFocus && current?.returnFocus) {
+        window.requestAnimationFrame(() => current.returnFocus?.focus());
+      }
+      return undefined;
+    });
+  }, []);
 
   const listEmptyMessage = listFilterMode === "text"
     ? listTextFilter.trim()
@@ -363,12 +398,14 @@ export function ChangesPanel({
         {changes.length ? (
           changeView === "tree" ? (
             <ChangeTree
+              scopeDirectory={directory}
               changes={changes}
               selectedPath={selectedPath}
               selectedCommitPaths={selectedCommitPaths}
               query={treeQuery}
               onSelect={onSelect}
               onToggleCommitSelection={onToggleCommitSelection}
+              onOpenContextMenu={openContextMenu}
             />
           ) : (
             <ChangeList
@@ -381,6 +418,7 @@ export function ChangesPanel({
               direction={sortDirection}
               onSelect={onSelect}
               onToggleCommitSelection={onToggleCommitSelection}
+              onOpenContextMenu={openContextMenu}
             />
           )
         ) : (
@@ -391,6 +429,16 @@ export function ChangesPanel({
           </div>
         )}
       </div>
+      {contextMenu && (
+        <ChangeContextMenu
+          change={contextMenu.change}
+          x={contextMenu.x}
+          y={contextMenu.y}
+          tortoiseAvailable={tortoiseSvn?.available ?? false}
+          onAction={onItemAction}
+          onClose={closeContextMenu}
+        />
+      )}
     </div>
   );
 }

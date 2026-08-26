@@ -1,6 +1,8 @@
 mod beyond_compare;
 mod models;
+mod path_scope;
 mod svn;
+mod system_shell;
 mod tortoise_svn;
 
 use models::{
@@ -85,6 +87,34 @@ async fn open_tortoise_svn_commit(
     .map_err(|error| format!("TortoiseSVN 启动任务异常结束：{error}"))?
 }
 
+#[tauri::command]
+async fn open_tortoise_svn_action(
+    action: String,
+    path: String,
+    directory: String,
+    wc_root: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        tortoise_svn::open_action(&action, &path, &directory, &wc_root)
+    })
+    .await
+    .map_err(|error| format!("TortoiseSVN 启动任务异常结束：{error}"))?
+}
+
+#[tauri::command]
+async fn open_change_path(
+    action: String,
+    path: String,
+    directory: String,
+    wc_root: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        system_shell::open_change_path(&action, &path, &directory, &wc_root)
+    })
+    .await
+    .map_err(|error| format!("系统路径操作任务异常结束：{error}"))?
+}
+
 fn launch_directory() -> Option<String> {
     let argument = std::env::args_os().nth(1)?;
     let mut path = PathBuf::from(argument);
@@ -104,6 +134,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(LaunchDirectory(launch_directory()))
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             get_launch_directory,
             scan_changes,
@@ -113,7 +144,9 @@ pub fn run() {
             get_file_fingerprint,
             get_property_diff,
             open_in_beyond_compare,
-            open_tortoise_svn_commit
+            open_tortoise_svn_commit,
+            open_tortoise_svn_action,
+            open_change_path
         ])
         .run(tauri::generate_context!())
         .expect("error while running SVN Scope");

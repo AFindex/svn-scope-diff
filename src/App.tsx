@@ -22,6 +22,7 @@ import type {
 import { ChangesPanel } from "./components/ChangesPanel";
 import { DiffPane } from "./components/DiffPane";
 import { Icon } from "./components/Icons";
+import type { ChangeItemAction } from "./changeItemActions";
 import { DiffCache, sameFingerprint } from "./diffCache";
 import { textDiffChanges } from "./textDiffFiles";
 import {
@@ -106,6 +107,24 @@ function initialSidebarWidth() {
 
 function normalizedPath(path: string) {
   return path.replace(/[\\/]+$/, "").toLowerCase();
+}
+
+async function copyText(text: string) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  textarea.style.pointerEvents = "none";
+  document.body.appendChild(textarea);
+  textarea.select();
+  const copied = document.execCommand("copy");
+  textarea.remove();
+  if (!copied) throw new Error("系统剪贴板拒绝了复制操作");
 }
 
 function getFileFingerprint(path: string) {
@@ -721,13 +740,13 @@ export default function App() {
     setCommitSelection(new Set());
   }, []);
 
-  const openTortoiseCommit = useCallback(async () => {
-    if (!scan || !commitChanges.length || commitLaunching) return;
+  const launchTortoiseCommit = useCallback(async (paths: string[]) => {
+    if (!scan || !paths.length || commitLaunching) return;
     setCommitLaunching(true);
     setToast(undefined);
     try {
       const result = await invoke<CommitLaunchResult>("open_tortoise_svn_commit", {
-        paths: commitChanges.map((change) => change.path),
+        paths,
         directory: scan.directory,
         wcRoot: scan.wcRoot,
       });
@@ -737,7 +756,42 @@ export default function App() {
     } finally {
       setCommitLaunching(false);
     }
-  }, [commitChanges, commitLaunching, scan]);
+  }, [commitLaunching, scan]);
+
+  const openTortoiseCommit = useCallback(async () => {
+    await launchTortoiseCommit(commitChanges.map((change) => change.path));
+  }, [commitChanges, launchTortoiseCommit]);
+
+  const handleItemAction = useCallback(async (action: ChangeItemAction, change: ChangeEntry) => {
+    if (!scan) return;
+    setToast(undefined);
+    try {
+      if (action === "copyRelativePath" || action === "copyFullPath") {
+        const value = action === "copyRelativePath" ? change.relativePath : change.path;
+        await copyText(value);
+        setToast(`已复制${action === "copyRelativePath" ? "相对" : "完整"}路径：${value}`);
+        return;
+      }
+
+      if (action === "commit") {
+        await launchTortoiseCommit([change.path]);
+        return;
+      }
+
+      const command = action === "open" || action === "reveal"
+        ? "open_change_path"
+        : "open_tortoise_svn_action";
+      const message = await invoke<string>(command, {
+        action,
+        path: change.path,
+        directory: scan.directory,
+        wcRoot: scan.wcRoot,
+      });
+      setToast(message);
+    } catch (error) {
+      setToast(errorMessage(error));
+    }
+  }, [launchTortoiseCommit, scan]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -845,6 +899,7 @@ export default function App() {
             </div>
 
             <ChangesPanel
+              directory={scan.directory}
               changes={scan.changes}
               selectedPath={selected?.path}
               selectedCommitPaths={commitSelection}
@@ -857,6 +912,7 @@ export default function App() {
               onClearCommitSelection={clearCommitSelection}
               onCommitSelection={() => void openTortoiseCommit()}
               onUpdateAllTextDiffs={() => void updateAllTextDiffs()}
+              onItemAction={(action, change) => void handleItemAction(action, change)}
             />
           </aside>
 
@@ -892,6 +948,13 @@ export default function App() {
               beyondCompareAvailable={beyondCompare?.available ?? false}
               beyondComparePath={beyondCompare?.path}
               onOpenBeyondCompare={() => void openBeyondCompare()}
+              tortoiseSvnAvailable={tortoiseSvn?.available ?? false}
+              onOpenConflictEditor={() => {
+                if (selected) void handleItemAction("conflictEditor", selected);
+              }}
+              onMarkResolved={() => {
+                if (selected) void handleItemAction("resolve", selected);
+              }}
               propertyDiff={activePropertyDiff?.value}
               propertyDiffLoading={activePropertyDiff?.loading ?? false}
               propertyDiffLoaded={activePropertyDiff?.loaded ?? false}

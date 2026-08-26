@@ -1,4 +1,5 @@
 use crate::models::{CommitLaunchResult, TortoiseSvnAvailability};
+use crate::path_scope::{path_key, validate_scope, validate_target};
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -42,22 +43,12 @@ pub fn open_commit(
         ));
     }
 
-    let scope = absolute_path(directory, "当前目录")?;
-    let working_copy_root = absolute_path(wc_root, "SVN 工作副本根目录")?;
-    if !path_is_within(&scope, &working_copy_root) {
-        return Err("当前目录不在扫描结果声明的 SVN 工作副本内。".to_owned());
-    }
+    let (scope, working_copy_root) = validate_scope(directory, wc_root)?;
 
     let mut seen = HashSet::new();
     let mut targets = Vec::with_capacity(paths.len());
     for raw_path in paths {
-        let target = absolute_path(&raw_path, "提交目标")?;
-        if !path_is_within(&target, &scope) || !path_is_within(&target, &working_copy_root) {
-            return Err(format!(
-                "拒绝转交当前扫描范围之外的路径：{}",
-                target.display()
-            ));
-        }
+        let target = validate_target(&raw_path, &scope, &working_copy_root, "提交目标")?;
         if seen.insert(path_key(&target)) {
             targets.push(target);
         }
@@ -105,6 +96,54 @@ pub fn open_commit(
         selected_count: targets.len(),
         message,
     })
+}
+
+struct ActionSpec {
+    command: &'static str,
+    opened_label: &'static str,
+}
+
+fn action_spec(action: &str) -> Option<ActionSpec> {
+    let (command, opened_label) = match action {
+        "revert" => ("revert", "Revert 确认窗口"),
+        "blame" => ("blame", "Blame 窗口"),
+        "showLog" => ("log", "日志窗口"),
+        "conflictEditor" => ("conflicteditor", "冲突编辑器"),
+        "resolve" => ("resolve", "标记为已解决确认窗口"),
+        _ => return None,
+    };
+    Some(ActionSpec {
+        command,
+        opened_label,
+    })
+}
+
+pub fn open_action(
+    action: &str,
+    path: &str,
+    directory: &str,
+    wc_root: &str,
+) -> Result<String, String> {
+    let spec = action_spec(action).ok_or_else(|| format!("不支持的 TortoiseSVN 操作：{action}"))?;
+    let (scope, working_copy_root) = validate_scope(directory, wc_root)?;
+    let target = validate_target(path, &scope, &working_copy_root, "操作目标")?;
+    let executable = locate().ok_or_else(|| {
+        "未找到 TortoiseProc.exe。请安装 TortoiseSVN，或设置 SVN_SCOPE_TORTOISEPROC_EXE 后重启应用。"
+            .to_owned()
+    })?;
+
+    let mut command = Command::new(&executable);
+    command.arg(format!("/command:{}", spec.command));
+    append_path_argument(&mut command, &target);
+    command
+        .spawn()
+        .map_err(|error| format!("无法启动 {}：{error}", executable.display()))?;
+
+    Ok(format!(
+        "已为 {} 打开 TortoiseSVN {}。",
+        target.display(),
+        spec.opened_label
+    ))
 }
 
 fn locate() -> Option<PathBuf> {
@@ -208,28 +247,6 @@ fn find_on_path(name: &str) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-fn absolute_path(value: &str, label: &str) -> Result<PathBuf, String> {
-    let path = PathBuf::from(value);
-    if !path.is_absolute() {
-        return Err(format!("{label}不是绝对路径：{}", path.display()));
-    }
-    std::path::absolute(&path)
-        .map_err(|error| format!("无法解析{label} {}：{error}", path.display()))
-}
-
-fn path_key(path: &Path) -> String {
-    path.to_string_lossy()
-        .replace('/', "\\")
-        .trim_end_matches(['\\', '/'])
-        .to_lowercase()
-}
-
-fn path_is_within(path: &Path, directory: &Path) -> bool {
-    let path = path_key(path);
-    let directory = path_key(directory);
-    path == directory || path.starts_with(&format!("{directory}\\"))
-}
-
 fn request_directory() -> Result<PathBuf, String> {
     let directory = std::env::temp_dir()
         .join("SVNScope")
@@ -247,12 +264,24 @@ fn pathfile_argument(path: &Path) -> String {
     format!(r#"/pathfile:"{}""#, path.to_string_lossy())
 }
 
+fn path_argument(path: &Path) -> String {
+    format!(r#"/path:"{}""#, path.to_string_lossy())
+}
+
 fn append_pathfile_argument(command: &mut Command, path: &Path) {
     #[cfg(windows)]
     command.raw_arg(pathfile_argument(path));
 
     #[cfg(not(windows))]
     command.arg(format!("/pathfile:{}", path.to_string_lossy()));
+}
+
+fn append_path_argument(command: &mut Command, path: &Path) {
+    #[cfg(windows)]
+    command.raw_arg(path_argument(path));
+
+    #[cfg(not(windows))]
+    command.arg(format!("/path:{}", path.to_string_lossy()));
 }
 
 fn request_file_name() -> String {
@@ -327,18 +356,6 @@ HKEY_LOCAL_MACHINE\SOFTWARE\TortoiseSVN
     }
 
     #[test]
-    fn path_scope_check_does_not_match_similar_sibling_names() {
-        assert!(path_is_within(
-            Path::new(r"F:\wc\src\main.cs"),
-            Path::new(r"F:\wc\src")
-        ));
-        assert!(!path_is_within(
-            Path::new(r"F:\wc\src-old\main.cs"),
-            Path::new(r"F:\wc\src")
-        ));
-    }
-
-    #[test]
     fn path_file_is_utf16_little_endian_without_bom() {
         let encoded = encode_path_file(&[PathBuf::from(r"F:\工作副本\main.cs")]);
         assert_ne!(&encoded[..2], &[0xff, 0xfe]);
@@ -360,5 +377,24 @@ HKEY_LOCAL_MACHINE\SOFTWARE\TortoiseSVN
             )),
             r#"/pathfile:"C:\Users\Test User\AppData\Local\Temp\SVNScope\request.paths""#
         );
+    }
+
+    #[test]
+    fn direct_path_command_uses_tortoise_value_quoting() {
+        assert_eq!(
+            path_argument(Path::new(r"C:\working copy\src\main.cs")),
+            r#"/path:"C:\working copy\src\main.cs""#
+        );
+    }
+
+    #[test]
+    fn only_explicit_tortoise_actions_are_allowed() {
+        assert_eq!(action_spec("revert").unwrap().command, "revert");
+        assert_eq!(action_spec("showLog").unwrap().command, "log");
+        assert_eq!(
+            action_spec("conflictEditor").unwrap().command,
+            "conflicteditor"
+        );
+        assert!(action_spec("update").is_none());
     }
 }

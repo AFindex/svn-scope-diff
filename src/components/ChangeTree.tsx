@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { conflictLabel, isConflictedChange } from "../changeItemActions";
 import { commitPathKey, isCommitSelectable } from "../commitSelection";
 import { displayStatusCode } from "../status";
 import type { ChangeEntry, TreeNode } from "../types";
@@ -6,22 +7,30 @@ import { Icon } from "./Icons";
 import { SelectionCheckbox, type SelectionState } from "./SelectionCheckbox";
 
 interface ChangeTreeProps {
+  scopeDirectory: string;
   changes: ChangeEntry[];
   selectedPath?: string;
   selectedCommitPaths: ReadonlySet<string>;
   query: string;
   onSelect: (change: ChangeEntry) => void;
   onToggleCommitSelection: (changes: ChangeEntry[], checked: boolean) => void;
+  onOpenContextMenu: (
+    change: ChangeEntry,
+    x: number,
+    y: number,
+    returnFocus?: HTMLElement,
+  ) => void;
 }
 
 function makeNode(key: string, name: string, isFolder: boolean): TreeNode {
-  return { key, name, isFolder, children: [], selectableChanges: [] };
+  return { key, name, isFolder, children: [], selectableChanges: [], conflictCount: 0 };
 }
 
 function buildTree(changes: ChangeEntry[]): TreeNode[] {
   const root = makeNode("", "", true);
 
   for (const change of changes) {
+    const conflicted = isConflictedChange(change);
     const parts = change.relativePath === "." ? [change.name] : change.relativePath.split("/").filter(Boolean);
     let parent = root;
     let path = "";
@@ -39,6 +48,7 @@ function buildTree(changes: ChangeEntry[]): TreeNode[] {
         node.isFolder = change.isDirectory || node.children.length > 0;
       }
       if (isCommitSelectable(change)) node.selectableChanges.push(change);
+      if (conflicted) node.conflictCount += 1;
       parent = node;
     });
   }
@@ -56,6 +66,7 @@ function buildTree(changes: ChangeEntry[]): TreeNode[] {
 
 function statusTitle(change?: ChangeEntry) {
   if (!change) return "";
+  if (isConflictedChange(change)) return conflictLabel(change);
   const labels: Record<string, string> = {
     added: "新增",
     deleted: "删除",
@@ -73,13 +84,33 @@ function statusTitle(change?: ChangeEntry) {
   return change.properties === "modified" && change.item !== "normal" ? `${base} + 属性修改` : base;
 }
 
+function contextChangeForNode(node: TreeNode, scopeDirectory: string): ChangeEntry {
+  if (node.change) return node.change;
+  const separator = scopeDirectory.includes("\\") ? "\\" : "/";
+  const relativePath = node.key.replaceAll("/", separator);
+  return {
+    path: `${scopeDirectory.replace(/[\\/]+$/, "")}${separator}${relativePath}`,
+    relativePath: node.key,
+    name: node.name,
+    item: "normal",
+    properties: "none",
+    statusCode: "•",
+    isDirectory: true,
+    treeConflicted: false,
+    baseRevision: node.selectableChanges.find((change) => change.baseRevision)?.baseRevision ?? null,
+    contextOnly: true,
+  };
+}
+
 export function ChangeTree({
+  scopeDirectory,
   changes,
   selectedPath,
   selectedCommitPaths,
   query,
   onSelect,
   onToggleCommitSelection,
+  onOpenContextMenu,
 }: ChangeTreeProps) {
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
   const filtered = useMemo(() => {
@@ -116,6 +147,8 @@ export function ChangeTree({
   const renderNode = (node: TreeNode, level: number) => {
     const isCollapsed = collapsed.has(node.key);
     const isSelected = node.change?.path === selectedPath;
+    const directConflict = Boolean(node.change && isConflictedChange(node.change));
+    const contextChange = contextChangeForNode(node, scopeDirectory);
     const commitChanges = node.selectableChanges;
     const commitSelectedCount = selectedCounts.get(node.key) ?? 0;
     const selectionState: SelectionState = commitSelectedCount === 0
@@ -126,9 +159,20 @@ export function ChangeTree({
     return (
       <div key={node.key} className="tree-branch">
         <div
-          className={`tree-row ${isSelected ? "selected" : ""} ${selectionState !== "none" ? "commit-selected" : ""}`}
+          className={`tree-row ${isSelected ? "selected" : ""} ${selectionState !== "none" ? "commit-selected" : ""} ${node.conflictCount ? "conflicted" : ""}`}
           style={{ paddingLeft: 4 + level * 16 }}
           title={node.change ? `${statusTitle(node.change)} · ${node.change.relativePath}` : node.name}
+          onContextMenu={(event) => {
+            event.preventDefault();
+            if (node.change) onSelect(node.change);
+            const bounds = event.currentTarget.getBoundingClientRect();
+            onOpenContextMenu(
+              contextChange,
+              event.clientX || bounds.left + 32,
+              event.clientY || bounds.bottom,
+              event.currentTarget.querySelector<HTMLButtonElement>(".tree-open-target") ?? undefined,
+            );
+          }}
         >
           {node.isFolder ? (
             <button
@@ -168,6 +212,17 @@ export function ChangeTree({
               <Icon name={node.isFolder && !isCollapsed ? "folderOpen" : node.isFolder ? "folder" : "file"} size={16} />
             </span>
             <span className="tree-name">{node.name}</span>
+            {node.conflictCount > 0 && (
+              <span
+                className={`tree-conflict-indicator ${directConflict ? "direct" : "nested"}`}
+                title={directConflict
+                  ? conflictLabel(node.change!)
+                  : `此目录包含 ${node.conflictCount} 个冲突项`}
+              >
+                <Icon name="conflict" size={12} />
+                {!directConflict && node.conflictCount > 1 && <small>{node.conflictCount}</small>}
+              </span>
+            )}
             {node.change && (
               <span className="status-badge" data-status={node.change.statusCode} title={statusTitle(node.change)}>
                 {displayStatusCode(node.change.statusCode)}

@@ -19,6 +19,13 @@ type IconName =
   | "sortAsc"
   | "sortDesc"
   | "commit"
+  | "undo"
+  | "blame"
+  | "history"
+  | "copy"
+  | "locate"
+  | "conflict"
+  | "check"
   | "close";
 
 interface IconProps extends SVGProps<SVGSVGElement> {
@@ -144,6 +151,47 @@ export function Icon({ name, size = 16, ...props }: IconProps) {
         <path d="M8 19v-2h8v2" />
       </>
     ),
+    undo: (
+      <>
+        <path d="M9 7 4 11l5 4" />
+        <path d="M5 11h8a6 6 0 0 1 6 6v1" />
+      </>
+    ),
+    blame: (
+      <>
+        <circle cx="9" cy="8" r="3" />
+        <path d="M4 19v-2a5 5 0 0 1 10 0v2" />
+        <path d="M17 8v7M14.5 10.5 17 8l2.5 2.5" />
+      </>
+    ),
+    history: (
+      <>
+        <path d="M4 7v5h5" />
+        <path d="M5.4 16a8 8 0 1 0-.9-8L4 12" />
+        <path d="M12 7v5l3 2" />
+      </>
+    ),
+    copy: (
+      <>
+        <rect x="8" y="8" width="11" height="11" rx="2" />
+        <path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3" />
+      </>
+    ),
+    locate: (
+      <>
+        <path d="M3 7.5h7l2-2h3.5a2 2 0 0 1 2 2H21v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+        <circle cx="15" cy="13" r="2.5" />
+        <path d="M15 8.5v2M15 15.5v2M10.5 13h2M17.5 13h2" />
+      </>
+    ),
+    conflict: (
+      <>
+        <path d="M12 3 2.5 20h19z" />
+        <path d="M12 8v5" />
+        <circle cx="12" cy="16.5" r=".7" fill="currentColor" stroke="none" />
+      </>
+    ),
+    check: <path d="m5 12 4 4L19 6" />,
     close: <path d="m6 6 12 12M18 6 6 18" />,
   }[name];
 

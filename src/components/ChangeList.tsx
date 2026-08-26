@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import { directoryOf, extensionLabel, extensionOf } from "../changeFilters";
+import { conflictLabel, isConflictedChange } from "../changeItemActions";
 import { commitPathKey, isCommitSelectable } from "../commitSelection";
 import { displayStatusCode } from "../status";
 import type { ChangeEntry } from "../types";
@@ -19,6 +20,12 @@ interface ChangeListProps {
   direction: SortDirection;
   onSelect: (change: ChangeEntry) => void;
   onToggleCommitSelection: (changes: ChangeEntry[], checked: boolean) => void;
+  onOpenContextMenu: (
+    change: ChangeEntry,
+    x: number,
+    y: number,
+    returnFocus?: HTMLElement,
+  ) => void;
 }
 
 const statusOrder: Record<string, number> = {
@@ -43,6 +50,7 @@ export function ChangeList({
   direction,
   onSelect,
   onToggleCommitSelection,
+  onOpenContextMenu,
 }: ChangeListProps) {
   const rows = useMemo(() => {
     const sorted = [...changes];
@@ -75,12 +83,24 @@ export function ChangeList({
         const extension = extensionLabel(extensionOf(change));
         const commitSelectable = isCommitSelectable(change);
         const commitSelected = selectedCommitPaths.has(commitPathKey(change.path));
+        const conflicted = isConflictedChange(change);
         return (
           <div
             key={change.path}
             role="listitem"
-            className={`change-list-row ${change.path === selectedPath ? "selected" : ""} ${commitSelected ? "commit-selected" : ""}`}
+            className={`change-list-row ${change.path === selectedPath ? "selected" : ""} ${commitSelected ? "commit-selected" : ""} ${conflicted ? "conflicted" : ""}`}
             title={`${change.relativePath} · ${change.item}`}
+            onContextMenu={(event) => {
+              event.preventDefault();
+              onSelect(change);
+              const bounds = event.currentTarget.getBoundingClientRect();
+              onOpenContextMenu(
+                change,
+                event.clientX || bounds.left + 32,
+                event.clientY || bounds.bottom,
+                event.currentTarget.querySelector<HTMLButtonElement>(".change-list-open") ?? undefined,
+              );
+            }}
           >
             <SelectionCheckbox
               state={commitSelected ? "all" : "none"}
@@ -106,6 +126,12 @@ export function ChangeList({
                 <span className="list-file-name">{change.name}</span>
                 <span className="list-file-path">{directory === "." ? change.relativePath : directory}</span>
               </span>
+              {conflicted && (
+                <span className="list-conflict-indicator" title={conflictLabel(change)}>
+                  <Icon name="conflict" size={12} />
+                  冲突
+                </span>
+              )}
               <span className="list-extension">{extension}</span>
             </button>
           </div>
