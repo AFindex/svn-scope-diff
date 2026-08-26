@@ -9,6 +9,7 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import type {
   ChangeEntry,
@@ -16,6 +17,8 @@ import type {
   DiffResult,
   FileFingerprint,
   ScanResult,
+  SvnUpdateFinished,
+  SvnUpdateStatus,
   ToolAvailability,
   TortoiseSvnAvailability,
 } from "./types";
@@ -86,6 +89,16 @@ const DIFF_CACHE_LIMIT = 12;
 const FILE_CHECK_INTERVAL_MS = 1500;
 const BULK_DIFF_CONCURRENCY = 3;
 const SIDEBAR_WIDTH_STORAGE_KEY = "svn-scope.sidebar-width";
+
+function idleSvnUpdateStatus(): SvnUpdateStatus {
+  return {
+    running: false,
+    updateId: null,
+    pid: null,
+    directory: null,
+    cancelRequested: false,
+  };
+}
 
 function currentViewportWidth() {
   return Math.max(
@@ -160,6 +173,8 @@ export default function App() {
   const [commitLaunching, setCommitLaunching] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(initialSidebarWidth);
   const [sidebarResizing, setSidebarResizing] = useState(false);
+  const [svnUpdate, setSvnUpdate] = useState<SvnUpdateStatus>(idleSvnUpdateStatus);
+  const [svnUpdateLaunching, setSvnUpdateLaunching] = useState(false);
   const diffCacheRef = useRef(new DiffCache(DIFF_CACHE_LIMIT));
   const selectedRef = useRef<ChangeEntry | undefined>(undefined);
   const watchBaselineRef = useRef<{ path: string; fingerprint: FileFingerprint } | undefined>(undefined);
@@ -169,6 +184,7 @@ export default function App() {
   const activeScanDirectoryRef = useRef<string | undefined>(undefined);
   const workspaceRef = useRef<HTMLDivElement | null>(null);
   const sidebarWidthRef = useRef(sidebarWidth);
+  const finishedUpdateIdsRef = useRef(new Set<number>());
   const sidebarDragRef = useRef<{
     pointerId: number;
     startX: number;
@@ -322,6 +338,60 @@ export default function App() {
 
   useEffect(() => {
     let active = true;
+    let unlistenUpdate: (() => void) | undefined;
+
+    const handleFinished = (finished: SvnUpdateFinished) => {
+      finishedUpdateIdsRef.current.add(finished.updateId);
+      setSvnUpdate((current) => current.updateId === finished.updateId
+        ? idleSvnUpdateStatus()
+        : current);
+      setSvnUpdateLaunching(false);
+
+      void (async () => {
+        let refreshMessage = "";
+        if (normalizedPath(finished.directory) === activeScanDirectoryRef.current) {
+          const result = await scanDirectory(finished.directory, true);
+          if (!active) return;
+          refreshMessage = result
+            ? ` 已重新扫描：${result.changes.length} 项变更。`
+            : " 自动重新扫描失败，请查看界面错误后手动刷新。";
+        }
+        if (active) setToast(`${finished.message}${refreshMessage}`);
+      })();
+    };
+
+    const setup = async () => {
+      try {
+        const stopListening = await listen<SvnUpdateFinished>(
+          "svn-update-finished",
+          (event) => handleFinished(event.payload),
+        );
+        if (!active) {
+          stopListening();
+          return;
+        }
+        unlistenUpdate = stopListening;
+        const current = await invoke<SvnUpdateStatus>("get_svn_update_status");
+        if (
+          active
+          && (current.updateId === null || !finishedUpdateIdsRef.current.has(current.updateId))
+        ) {
+          setSvnUpdate(current);
+        }
+      } catch (error) {
+        if (active) setToast(`无法初始化 SVN Update 状态：${errorMessage(error)}`);
+      }
+    };
+
+    void setup();
+    return () => {
+      active = false;
+      unlistenUpdate?.();
+    };
+  }, [scanDirectory]);
+
+  useEffect(() => {
+    let active = true;
     invoke<string | null>("get_launch_directory")
       .then((directory) => {
         if (active && directory) void scanDirectory(directory);
@@ -441,7 +511,7 @@ export default function App() {
   }, [requestFileReload, selected, storeDiffCache]);
 
   useEffect(() => {
-    if (!selected || selected.isDirectory || !diff) return;
+    if (!selected || selected.isDirectory || !diff || svnUpdate.running) return;
     let active = true;
     const path = selected.path;
 
@@ -477,7 +547,7 @@ export default function App() {
       active = false;
       window.clearInterval(timer);
     };
-  }, [diff, requestFileReload, selected]);
+  }, [diff, requestFileReload, selected, svnUpdate.running]);
 
   const keepCurrentDiff = useCallback(() => {
     const update = pendingFileUpdateRef.current;
@@ -539,6 +609,10 @@ export default function App() {
   }, [storeDiffCache]);
 
   const updateAllTextDiffs = useCallback(async () => {
+    if (svnUpdate.running) {
+      setToast("SVN Update 进行中，结束后会自动重新扫描变更");
+      return;
+    }
     if (bulkDiffRunningRef.current) return;
     if (!eligibleTextChanges.length) {
       setToast("当前修改中没有符合白名单的代码文本文件");
@@ -678,7 +752,7 @@ export default function App() {
     if (counters.binary) details.push(`二进制跳过 ${counters.binary}`);
     if (counters.failed) details.push(`失败 ${counters.failed}`);
     setToast(`文本 Diff 更新完成：${details.join("，")}`);
-  }, [eligibleTextChanges, requestFileReload, storeDiffCache]);
+  }, [eligibleTextChanges, requestFileReload, storeDiffCache, svnUpdate.running]);
 
   const loadPropertyDiff = useCallback(() => {
     if (!selected || !["modified", "conflicted"].includes(selected.properties)) return;
@@ -702,7 +776,54 @@ export default function App() {
       });
   }, [propertyDiffState, selected]);
 
+  const startSvnUpdate = useCallback(async () => {
+    if (!scan || scanLoading || svnUpdate.running || svnUpdateLaunching) return;
+    setSvnUpdateLaunching(true);
+    setToast(undefined);
+    bulkDiffRunRef.current += 1;
+    bulkDiffRunningRef.current = false;
+    setBulkDiffProgress(undefined);
+    pendingFileUpdateRef.current = undefined;
+    setPendingFileUpdate(undefined);
+    watchBaselineRef.current = undefined;
+    try {
+      const status = await invoke<SvnUpdateStatus>("start_svn_update", {
+        directory: scan.directory,
+        wcRoot: scan.wcRoot,
+      });
+      const finishedBeforeResponse = status.updateId !== null
+        && finishedUpdateIdsRef.current.has(status.updateId);
+      if (!finishedBeforeResponse) {
+        setSvnUpdate(status);
+        setToast(`已在独立控制台启动 SVN Update：${scan.directory}`);
+      }
+    } catch (error) {
+      setToast(errorMessage(error));
+    } finally {
+      setSvnUpdateLaunching(false);
+    }
+  }, [scan, scanLoading, svnUpdate.running, svnUpdateLaunching]);
+
+  const cancelSvnUpdate = useCallback(async () => {
+    if (!svnUpdate.running || svnUpdate.updateId === null || svnUpdate.cancelRequested) return;
+    try {
+      const status = await invoke<SvnUpdateStatus>("cancel_svn_update", {
+        updateId: svnUpdate.updateId,
+      });
+      if (!finishedUpdateIdsRef.current.has(svnUpdate.updateId)) {
+        setSvnUpdate(status);
+        setToast("正在取消 SVN Update，请等待控制台进程安全退出…");
+      }
+    } catch (error) {
+      setToast(errorMessage(error));
+    }
+  }, [svnUpdate.cancelRequested, svnUpdate.running, svnUpdate.updateId]);
+
   const chooseDirectory = useCallback(async () => {
+    if (svnUpdate.running || svnUpdateLaunching) {
+      setToast("请先完成或取消当前 SVN Update，再切换目录");
+      return;
+    }
     const selectedDirectory = await open({
       directory: true,
       multiple: false,
@@ -711,13 +832,13 @@ export default function App() {
     if (typeof selectedDirectory === "string") {
       await scanDirectory(selectedDirectory);
     }
-  }, [scanDirectory]);
+  }, [scanDirectory, svnUpdate.running, svnUpdateLaunching]);
 
   const refresh = useCallback(async () => {
-    if (!scan?.directory || scanLoading) return;
+    if (!scan?.directory || scanLoading || svnUpdate.running || svnUpdateLaunching) return;
     const result = await scanDirectory(scan.directory, true);
     if (result) setToast(`已刷新当前目录：${result.changes.length} 项变更`);
-  }, [scan, scanDirectory, scanLoading]);
+  }, [scan, scanDirectory, scanLoading, svnUpdate.running, svnUpdateLaunching]);
 
   const toggleCommitSelection = useCallback((targets: ChangeEntry[], checked: boolean) => {
     if (!scan) return;
@@ -742,6 +863,10 @@ export default function App() {
 
   const launchTortoiseCommit = useCallback(async (paths: string[]) => {
     if (!scan || !paths.length || commitLaunching) return;
+    if (svnUpdate.running) {
+      setToast("SVN Update 进行中，请结束后再打开提交窗口");
+      return;
+    }
     setCommitLaunching(true);
     setToast(undefined);
     try {
@@ -756,7 +881,7 @@ export default function App() {
     } finally {
       setCommitLaunching(false);
     }
-  }, [commitLaunching, scan]);
+  }, [commitLaunching, scan, svnUpdate.running]);
 
   const openTortoiseCommit = useCallback(async () => {
     await launchTortoiseCommit(commitChanges.map((change) => change.path));
@@ -764,6 +889,13 @@ export default function App() {
 
   const handleItemAction = useCallback(async (action: ChangeItemAction, change: ChangeEntry) => {
     if (!scan) return;
+    if (
+      svnUpdate.running
+      && ["commit", "revert", "blame", "showLog", "conflictEditor", "resolve"].includes(action)
+    ) {
+      setToast("SVN Update 进行中，请完成或取消后再执行此操作");
+      return;
+    }
     setToast(undefined);
     try {
       if (action === "copyRelativePath" || action === "copyFullPath") {
@@ -791,7 +923,7 @@ export default function App() {
     } catch (error) {
       setToast(errorMessage(error));
     }
-  }, [launchTortoiseCommit, scan]);
+  }, [launchTortoiseCommit, scan, svnUpdate.running]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -840,12 +972,22 @@ export default function App() {
           <span>SVN Scope</span>
         </div>
         <div className="project-title" title={scan?.directory}>
-          {scan && <span className="project-dot" />}
+          {scan && <span className={`project-dot ${svnUpdate.running ? "updating" : ""}`} />}
           <strong>{folderName(scan?.directory)}</strong>
-          {scan && <span className="change-total">{scan.changes.length} 项变更</span>}
+          {scan && (
+            <span className={`change-total ${svnUpdate.running ? "updating" : ""}`}>
+              {svnUpdate.running ? "正在 Update" : `${scan.changes.length} 项变更`}
+            </span>
+          )}
         </div>
         <div className="top-actions">
-          <button type="button" className="toolbar-button" onClick={() => void chooseDirectory()} title="打开目录 (Ctrl+O)">
+          <button
+            type="button"
+            className="toolbar-button"
+            onClick={() => void chooseDirectory()}
+            disabled={svnUpdate.running || svnUpdateLaunching}
+            title={svnUpdate.running ? "请先完成或取消 SVN Update" : "打开目录 (Ctrl+O)"}
+          >
             <Icon name="open" size={16} />
             打开目录
           </button>
@@ -853,11 +995,41 @@ export default function App() {
             type="button"
             className="toolbar-button refresh-toolbar-button"
             onClick={() => void refresh()}
-            disabled={!scan || scanLoading}
-            title="重新扫描当前打开目录的本地变更 (Ctrl+R)"
+            disabled={!scan || scanLoading || svnUpdate.running || svnUpdateLaunching}
+            title={svnUpdate.running
+              ? "SVN Update 结束后会自动刷新"
+              : "重新扫描当前打开目录的本地变更 (Ctrl+R)"}
           >
             <Icon name="refresh" size={17} className={scanLoading ? "rotating" : ""} />
             {scanLoading ? "正在刷新…" : "刷新变更"}
+          </button>
+          <button
+            type="button"
+            className={`toolbar-button svn-update-toolbar-button ${svnUpdate.running ? "running" : ""}`}
+            disabled={svnUpdate.running
+              ? svnUpdate.cancelRequested
+              : !scan || scanLoading || svnUpdateLaunching}
+            title={svnUpdate.running
+              ? svnUpdate.cancelRequested
+                ? "正在等待 SVN Update 退出"
+                : "取消当前 SVN Update"
+              : "在独立可见控制台中 Update 当前目录"}
+            onClick={() => void (svnUpdate.running ? cancelSvnUpdate() : startSvnUpdate())}
+          >
+            {svnUpdate.running ? (
+              svnUpdate.cancelRequested
+                ? <span className="spinner update-spinner" />
+                : <Icon name="close" size={15} />
+            ) : (
+              <Icon name="update" size={16} />
+            )}
+            {svnUpdateLaunching
+              ? "正在启动…"
+              : svnUpdate.running
+                ? svnUpdate.cancelRequested
+                  ? "正在取消…"
+                  : "取消 Update"
+                : "SVN Update"}
           </button>
         </div>
       </header>
@@ -905,6 +1077,7 @@ export default function App() {
               selectedCommitPaths={commitSelection}
               tortoiseSvn={tortoiseSvn}
               commitLaunching={commitLaunching}
+              workspaceUpdating={svnUpdate.running}
               textDiffCount={eligibleTextChanges.length}
               bulkDiffProgress={bulkDiffProgress}
               onSelect={setSelected}
@@ -968,6 +1141,14 @@ export default function App() {
       <footer className="statusbar">
         <span>{scan ? `SVN ${scan.svnVersion}` : "就绪"}</span>
         {scan?.revision && <span>工作副本 r{scan.revision}</span>}
+        {svnUpdate.running && (
+          <span className="svn-update-status" title={svnUpdate.directory ?? undefined}>
+            <span className="spinner" />
+            {svnUpdate.cancelRequested
+              ? "正在取消 SVN Update"
+              : `SVN Update 运行中${svnUpdate.pid ? ` · PID ${svnUpdate.pid}` : ""}`}
+          </span>
+        )}
         <span className="statusbar-spacer" />
         {scan && (
           <span className={beyondCompare?.available ? "tool-ready" : "tool-muted"}>

@@ -21,6 +21,7 @@ interface ChangeContextMenuProps {
   x: number;
   y: number;
   tortoiseAvailable: boolean;
+  workspaceUpdating: boolean;
   onAction: (action: ChangeItemAction, change: ChangeEntry) => void;
   onClose: (restoreFocus?: boolean) => void;
 }
@@ -65,6 +66,7 @@ export function ChangeContextMenu({
   x,
   y,
   tortoiseAvailable,
+  workspaceUpdating,
   onAction,
   onClose,
 }: ChangeContextMenuProps) {
@@ -73,6 +75,7 @@ export function ChangeContextMenu({
   const capabilities = changeActionCapabilities(change, tortoiseAvailable);
   const conflicted = isConflictedChange(change);
   const unavailableTitle = tortoiseAvailable ? undefined : "未检测到 TortoiseSVN";
+  const updateBlockedTitle = "SVN Update 进行中，请完成或取消后再执行此操作";
 
   useLayoutEffect(() => {
     const menu = menuRef.current;
@@ -162,8 +165,10 @@ export function ChangeContextMenu({
           icon="commit"
           label="单独提交此项…"
           hint="TortoiseSVN"
-          disabled={!capabilities.canCommit}
-          title={capabilities.canCommit
+          disabled={workspaceUpdating || !capabilities.canCommit}
+          title={workspaceUpdating
+            ? updateBlockedTitle
+            : capabilities.canCommit
             ? "只将此项目标交给 TortoiseSVN 提交窗口"
             : unavailableTitle
               ?? (conflicted
@@ -183,8 +188,10 @@ export function ChangeContextMenu({
               icon="conflict"
               label="打开冲突编辑器…"
               hint="Resolve"
-              disabled={!capabilities.canConflictEditor}
-              title={capabilities.canConflictEditor
+              disabled={workspaceUpdating || !capabilities.canConflictEditor}
+              title={workspaceUpdating
+                ? updateBlockedTitle
+                : capabilities.canConflictEditor
                 ? "使用 TortoiseSVN 配置的三方合并工具打开"
                 : unavailableTitle ?? "仅文本文件冲突可打开三方冲突编辑器"}
               onSelect={() => choose("conflictEditor")}
@@ -192,8 +199,10 @@ export function ChangeContextMenu({
             <MenuItem
               icon="check"
               label="标记为已解决…"
-              disabled={!capabilities.canResolve}
-              title={capabilities.canResolve
+              disabled={workspaceUpdating || !capabilities.canResolve}
+              title={workspaceUpdating
+                ? updateBlockedTitle
+                : capabilities.canResolve
                 ? "由 TortoiseSVN 再次确认后标记为已解决"
                 : unavailableTitle}
               onSelect={() => choose("resolve")}
@@ -207,8 +216,10 @@ export function ChangeContextMenu({
         <MenuItem
           icon="undo"
           label="Revert 修改…"
-          disabled={!capabilities.canRevert}
-          title={capabilities.canRevert
+          disabled={workspaceUpdating || !capabilities.canRevert}
+          title={workspaceUpdating
+            ? updateBlockedTitle
+            : capabilities.canRevert
             ? "打开 TortoiseSVN Revert 确认窗口，不会静默还原"
             : unavailableTitle
               ?? (change.contextOnly
@@ -220,8 +231,10 @@ export function ChangeContextMenu({
         <MenuItem
           icon="blame"
           label="追溯（Blame）…"
-          disabled={!capabilities.canBlame}
-          title={capabilities.canBlame
+          disabled={workspaceUpdating || !capabilities.canBlame}
+          title={workspaceUpdating
+            ? updateBlockedTitle
+            : capabilities.canBlame
             ? "打开 TortoiseSVN Blame 范围窗口"
             : unavailableTitle ?? "Blame 仅适用于有仓库历史的版本化文件"}
           onSelect={() => choose("blame")}
@@ -229,8 +242,10 @@ export function ChangeContextMenu({
         <MenuItem
           icon="history"
           label="显示日志（Show Log）…"
-          disabled={!capabilities.canShowLog}
-          title={capabilities.canShowLog
+          disabled={workspaceUpdating || !capabilities.canShowLog}
+          title={workspaceUpdating
+            ? updateBlockedTitle
+            : capabilities.canShowLog
             ? "显示此项目的 SVN 提交历史"
             : unavailableTitle ?? "未版本化项目没有仓库日志"}
           onSelect={() => choose("showLog")}

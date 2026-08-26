@@ -47,7 +47,7 @@ button {
 
 .topbar {
   display: grid;
-  grid-template-columns: 260px minmax(0, 1fr) 260px;
+  grid-template-columns: 240px minmax(0, 1fr) auto;
   align-items: center;
   padding: 0 10px 0 14px;
   border-bottom: 1px solid #d7dae1;
@@ -103,6 +103,13 @@ button {
   background: #aeb3bc;
 }
 
+.project-dot.updating {
+  border-color: #c88b2f;
+  background: #efa83c;
+  box-shadow: 0 0 0 3px #f6d89d66;
+  animation: update-pulse 1.2s ease-in-out infinite;
+}
+
 .change-total {
   padding: 2px 7px;
   color: #6b7280;
@@ -112,9 +119,16 @@ button {
   font-size: 11px;
 }
 
+.change-total.updating {
+  color: #8a5a17;
+  border-color: #e6c78e;
+  background: #fff7e5;
+}
+
 .top-actions {
   justify-content: flex-end;
   gap: 5px;
+  white-space: nowrap;
 }
 
 .toolbar-button,
@@ -146,6 +160,43 @@ button {
 
 .refresh-toolbar-button {
   min-width: 94px;
+}
+
+.svn-update-toolbar-button {
+  min-width: 104px;
+  color: #3559bd;
+  border-color: #ccd6f0;
+  background: #f7f9ff;
+}
+
+.svn-update-toolbar-button:hover:not(:disabled) {
+  color: #294daf;
+  border-color: #aebee8;
+  background: #edf2ff;
+}
+
+.svn-update-toolbar-button.running {
+  color: #a7434b;
+  border-color: #e6b9bd;
+  background: #fff2f3;
+}
+
+.svn-update-toolbar-button.running:hover:not(:disabled) {
+  color: #95343d;
+  border-color: #d98d94;
+  background: #ffe9eb;
+}
+
+.svn-update-toolbar-button .update-spinner {
+  width: 13px;
+  height: 13px;
+  border-color: #e3b7bb;
+  border-top-color: #ad414a;
+}
+
+@keyframes update-pulse {
+  0%, 100% { opacity: 0.72; }
+  50% { opacity: 1; }
 }
 
 .icon-button {
@@ -2439,6 +2490,25 @@ button:disabled {
   flex: 1;
 }
 
+.svn-update-status {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 5px;
+  overflow: hidden;
+  color: #9a671e;
+  text-overflow: ellipsis;
+}
+
+.svn-update-status .spinner {
+  width: 10px;
+  height: 10px;
+  flex: 0 0 10px;
+  border-width: 1.5px;
+  border-color: #e8d2a9;
+  border-top-color: #bd7a20;
+}
+
 .tool-ready,
 .tool-muted {
   display: inline-flex;
@@ -2759,7 +2829,7 @@ button:disabled {
 
 @media (max-width: 1100px) {
   .topbar {
-    grid-template-columns: 210px minmax(0, 1fr) 210px;
+    grid-template-columns: 185px minmax(0, 1fr) auto;
   }
 
   .workspace {

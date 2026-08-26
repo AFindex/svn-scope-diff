@@ -6,6 +6,7 @@ type IconName =
   | "folderOpen"
   | "file"
   | "refresh"
+  | "update"
   | "open"
   | "search"
   | "filter"
@@ -70,6 +71,13 @@ export function Icon({ name, size = 16, ...props }: IconProps) {
       <>
         <path d="M20 7v5h-5" />
         <path d="M18.2 16a8 8 0 1 1 .7-8.2L20 12" />
+      </>
+    ),
+    update: (
+      <>
+        <path d="M12 3v11" />
+        <path d="m8 10 4 4 4-4" />
+        <path d="M5 17v3h14v-3" />
       </>
     ),
     open: (

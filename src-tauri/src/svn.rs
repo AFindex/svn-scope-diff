@@ -459,6 +459,18 @@ fn svn_version() -> Result<String, String> {
     Ok(svn_installation()?.version)
 }
 
+pub(crate) fn executable_path() -> Result<PathBuf, String> {
+    Ok(svn_installation()?.executable)
+}
+
+pub(crate) fn working_copy_root(path: &Path) -> Result<PathBuf, String> {
+    Ok(working_copy_metadata(path)?.0)
+}
+
+pub(crate) fn target_argument(path: &Path) -> OsString {
+    svn_target(path)
+}
+
 fn run_svn<I, S>(arguments: I) -> Result<Output, String>
 where
     I: IntoIterator<Item = S>,

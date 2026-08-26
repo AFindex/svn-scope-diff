@@ -26,6 +26,7 @@ interface ChangesPanelProps {
   selectedCommitPaths: ReadonlySet<string>;
   tortoiseSvn?: TortoiseSvnAvailability;
   commitLaunching: boolean;
+  workspaceUpdating: boolean;
   textDiffCount: number;
   bulkDiffProgress?: {
     completed: number;
@@ -80,6 +81,7 @@ export function ChangesPanel({
   selectedCommitPaths,
   tortoiseSvn,
   commitLaunching,
+  workspaceUpdating,
   textDiffCount,
   bulkDiffProgress,
   onSelect,
@@ -333,8 +335,10 @@ export function ChangesPanel({
         <button
           type="button"
           className="tortoise-commit-button"
-          disabled={!commitChanges.length || !tortoiseSvn?.available || commitLaunching}
-          title={!tortoiseSvn
+          disabled={!commitChanges.length || !tortoiseSvn?.available || commitLaunching || workspaceUpdating}
+          title={workspaceUpdating
+            ? "SVN Update 进行中，请完成或取消后再提交"
+            : !tortoiseSvn
             ? "正在检测 TortoiseSVN"
             : !tortoiseSvn.available
               ? "未检测到 TortoiseProc.exe"
@@ -367,8 +371,10 @@ export function ChangesPanel({
           <button
             type="button"
             className="bulk-diff-button"
-            disabled={!textDiffCount || Boolean(bulkDiffProgress)}
-            title={textDiffCount
+            disabled={!textDiffCount || Boolean(bulkDiffProgress) || workspaceUpdating}
+            title={workspaceUpdating
+              ? "SVN Update 进行中，结束后会自动重新扫描"
+              : textDiffCount
               ? "更新全部白名单代码文本 Diff（.py、.cs、.bat、.ts、.cpp 等）"
               : "当前修改中没有符合后缀白名单的代码文本文件"}
             onClick={onUpdateAllTextDiffs}
@@ -435,6 +441,7 @@ export function ChangesPanel({
           x={contextMenu.x}
           y={contextMenu.y}
           tortoiseAvailable={tortoiseSvn?.available ?? false}
+          workspaceUpdating={workspaceUpdating}
           onAction={onItemAction}
           onClose={closeContextMenu}
         />

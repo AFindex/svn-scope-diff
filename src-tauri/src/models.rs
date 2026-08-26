@@ -39,6 +39,27 @@ pub struct CommitLaunchResult {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SvnUpdateStatus {
+    pub running: bool,
+    pub update_id: Option<u64>,
+    pub pid: Option<u32>,
+    pub directory: Option<String>,
+    pub cancel_requested: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SvnUpdateFinished {
+    pub update_id: u64,
+    pub directory: String,
+    pub outcome: String,
+    pub exit_code: Option<i32>,
+    pub forced: bool,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ScanResult {
     pub directory: String,
     pub wc_root: String,

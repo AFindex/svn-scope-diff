@@ -26,6 +26,23 @@ export interface CommitLaunchResult {
   message: string;
 }
 
+export interface SvnUpdateStatus {
+  running: boolean;
+  updateId: number | null;
+  pid: number | null;
+  directory: string | null;
+  cancelRequested: boolean;
+}
+
+export interface SvnUpdateFinished {
+  updateId: number;
+  directory: string;
+  outcome: "success" | "cancelled" | "failed";
+  exitCode: number | null;
+  forced: boolean;
+  message: string;
+}
+
 export interface ScanResult {
   directory: string;
   wcRoot: string;

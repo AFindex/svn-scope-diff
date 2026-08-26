@@ -2,11 +2,12 @@ mod beyond_compare;
 mod models;
 mod path_scope;
 mod svn;
+mod svn_update;
 mod system_shell;
 mod tortoise_svn;
 
 use models::{
-    CommitLaunchResult, DiffResult, FileFingerprint, ScanResult, ToolAvailability,
+    CommitLaunchResult, DiffResult, FileFingerprint, ScanResult, SvnUpdateStatus, ToolAvailability,
     TortoiseSvnAvailability,
 };
 use std::path::PathBuf;
@@ -115,6 +116,31 @@ async fn open_change_path(
     .map_err(|error| format!("系统路径操作任务异常结束：{error}"))?
 }
 
+#[tauri::command]
+fn get_svn_update_status(
+    state: tauri::State<'_, svn_update::SvnUpdateManager>,
+) -> Result<SvnUpdateStatus, String> {
+    svn_update::status(&state)
+}
+
+#[tauri::command]
+fn start_svn_update(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, svn_update::SvnUpdateManager>,
+    directory: String,
+    wc_root: String,
+) -> Result<SvnUpdateStatus, String> {
+    svn_update::start(app, &state, &directory, &wc_root)
+}
+
+#[tauri::command]
+fn cancel_svn_update(
+    state: tauri::State<'_, svn_update::SvnUpdateManager>,
+    update_id: u64,
+) -> Result<SvnUpdateStatus, String> {
+    svn_update::cancel(&state, update_id)
+}
+
 fn launch_directory() -> Option<String> {
     let argument = std::env::args_os().nth(1)?;
     let mut path = PathBuf::from(argument);
@@ -133,6 +159,7 @@ fn launch_directory() -> Option<String> {
 pub fn run() {
     tauri::Builder::default()
         .manage(LaunchDirectory(launch_directory()))
+        .manage(svn_update::SvnUpdateManager::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
@@ -146,7 +173,10 @@ pub fn run() {
             open_in_beyond_compare,
             open_tortoise_svn_commit,
             open_tortoise_svn_action,
-            open_change_path
+            open_change_path,
+            get_svn_update_status,
+            start_svn_update,
+            cancel_svn_update
         ])
         .run(tauri::generate_context!())
         .expect("error while running SVN Scope");
