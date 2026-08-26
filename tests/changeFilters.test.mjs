@@ -56,9 +56,14 @@ test("builds deterministic type options with counts", () => {
   ]);
 });
 
-test("filters by multiple text terms or one extension", () => {
-  const changes = [change("src\\VehicleController.cs"), change("tests\\VehicleTests.py"), change("README")];
-  assert.deepEqual(filterChanges(changes, "text", "src vehicle", ALL_FILE_TYPES), [changes[0]]);
-  assert.deepEqual(filterChanges(changes, "extension", "py", "py"), [changes[1]]);
-  assert.deepEqual(filterChanges(changes, "extension", "", ALL_FILE_TYPES), changes);
+test("filters by multiple text terms or multiple extensions", () => {
+  const changes = [
+    change("src\\VehicleController.cs"),
+    change("tests\\VehicleTests.py"),
+    change("README"),
+  ];
+  assert.deepEqual(filterChanges(changes, "text", "src vehicle", [ALL_FILE_TYPES]), [changes[0]]);
+  assert.deepEqual(filterChanges(changes, "extension", "", ["cs", "py"]), changes.slice(0, 2));
+  assert.deepEqual(filterChanges(changes, "extension", "", []), []);
+  assert.deepEqual(filterChanges(changes, "extension", "", [ALL_FILE_TYPES]), changes);
 });

@@ -60,11 +60,13 @@ export function filterChanges(
   changes: ChangeEntry[],
   mode: ListFilterMode,
   text: string,
-  extension: string,
+  extensions: readonly string[],
 ) {
   if (mode === "extension") {
-    if (extension === ALL_FILE_TYPES) return [...changes];
-    return changes.filter((change) => extensionOf(change) === extension);
+    if (extensions.includes(ALL_FILE_TYPES)) return [...changes];
+    if (!extensions.length) return [];
+    const selectedExtensions = new Set(extensions);
+    return changes.filter((change) => selectedExtensions.has(extensionOf(change)));
   }
 
   const terms = text.trim().toLowerCase().split(/\s+/).filter(Boolean);

@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   ALL_FILE_TYPES,
-  extensionLabel,
   fileTypeOptions,
   filterChanges,
   type ListFilterMode,
@@ -15,6 +14,7 @@ import { displayStatusCode } from "../status";
 import type { ChangeEntry, TortoiseSvnAvailability } from "../types";
 import { ChangeList, type ChangeListSortKey, type SortDirection } from "./ChangeList";
 import { ChangeTree } from "./ChangeTree";
+import { ExtensionFilterSelect } from "./ExtensionFilterSelect";
 import { Icon } from "./Icons";
 
 interface ChangesPanelProps {
@@ -89,12 +89,12 @@ export function ChangesPanel({
   const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
   const [listFilterMode, setListFilterMode] = useState<ListFilterMode>("text");
   const [listTextFilter, setListTextFilter] = useState("");
-  const [listExtensionFilter, setListExtensionFilter] = useState(ALL_FILE_TYPES);
+  const [listExtensionFilters, setListExtensionFilters] = useState<string[]>([ALL_FILE_TYPES]);
   const counts = useMemo(() => statusCounts(changes), [changes]);
   const typeOptions = useMemo(() => fileTypeOptions(changes), [changes]);
   const filteredListChanges = useMemo(
-    () => filterChanges(changes, listFilterMode, listTextFilter, listExtensionFilter),
-    [changes, listExtensionFilter, listFilterMode, listTextFilter],
+    () => filterChanges(changes, listFilterMode, listTextFilter, listExtensionFilters),
+    [changes, listExtensionFilters, listFilterMode, listTextFilter],
   );
   const filteredTreeChanges = useMemo(() => {
     const normalized = treeQuery.trim().toLocaleLowerCase();
@@ -126,19 +126,21 @@ export function ChangesPanel({
   }
 
   useEffect(() => {
-    if (
-      listExtensionFilter !== ALL_FILE_TYPES
-      && !typeOptions.some((option) => option.value === listExtensionFilter)
-    ) {
-      setListExtensionFilter(ALL_FILE_TYPES);
-    }
-  }, [listExtensionFilter, typeOptions]);
+    const availableValues = new Set(typeOptions.map((option) => option.value));
+    setListExtensionFilters((current) => {
+      if (current.includes(ALL_FILE_TYPES)) return current;
+      const availableSelection = current.filter((value) => availableValues.has(value));
+      return availableSelection.length === current.length ? current : availableSelection;
+    });
+  }, [typeOptions]);
 
   const listEmptyMessage = listFilterMode === "text"
     ? listTextFilter.trim()
       ? `没有匹配“${listTextFilter.trim()}”的变更`
       : "没有可显示的变更"
-    : `没有 ${extensionLabel(listExtensionFilter)} 类型的变更`;
+    : listExtensionFilters.length
+      ? "没有匹配所选后缀的变更"
+      : "请至少选择一种文件后缀";
 
   return (
     <div className="changes-panel">
@@ -259,22 +261,12 @@ export function ChangesPanel({
               onChange={setListTextFilter}
             />
           ) : (
-            <label className="type-filter-select">
-              <Icon name="file" size={14} />
-              <span className="visually-hidden">文件后缀</span>
-              <select
-                value={listExtensionFilter}
-                aria-label="按文件后缀筛选"
-                onChange={(event) => setListExtensionFilter(event.target.value)}
-              >
-                <option value={ALL_FILE_TYPES}>全部类型（{changes.length}）</option>
-                {typeOptions.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}（{option.count}）
-                  </option>
-                ))}
-              </select>
-            </label>
+            <ExtensionFilterSelect
+              options={typeOptions}
+              selectedValues={listExtensionFilters}
+              totalCount={changes.length}
+              onChange={setListExtensionFilters}
+            />
           )}
         </div>
       )}
