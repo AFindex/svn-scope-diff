@@ -22,6 +22,8 @@ interface ChangeContextMenuProps {
   y: number;
   tortoiseAvailable: boolean;
   workspaceUpdating: boolean;
+  scopeDirectory?: boolean;
+  canRemoveScope?: boolean;
   onAction: (action: ChangeItemAction, change: ChangeEntry) => void;
   onClose: (restoreFocus?: boolean) => void;
 }
@@ -67,6 +69,8 @@ export function ChangeContextMenu({
   y,
   tortoiseAvailable,
   workspaceUpdating,
+  scopeDirectory = false,
+  canRemoveScope = false,
   onAction,
   onClose,
 }: ChangeContextMenuProps) {
@@ -74,6 +78,15 @@ export function ChangeContextMenu({
   const [position, setPosition] = useState({ left: x, top: y });
   const capabilities = changeActionCapabilities(change, tortoiseAvailable);
   const conflicted = isConflictedChange(change);
+  const virtualDirectory = change.isDirectory && Boolean(change.contextOnly);
+  const hasRepositoryHistory = change.item !== "unversioned"
+    && change.baseRevision !== null
+    && !["added", "obstructed", "incomplete"].includes(change.item);
+  const showRevert = !change.isDirectory
+    || (!change.contextOnly && change.item !== "unversioned");
+  const showBlame = !change.isDirectory;
+  const showLog = !change.isDirectory || hasRepositoryHistory;
+  const showRepositorySection = showRevert || showBlame || showLog;
   const unavailableTitle = tortoiseAvailable ? undefined : "未检测到 TortoiseSVN";
   const updateBlockedTitle = "SVN Update 进行中，请完成或取消后再执行此操作";
 
@@ -145,13 +158,18 @@ export function ChangeContextMenu({
       onKeyDown={handleKeyDown}
     >
       <div className="change-context-header">
-        <span className="status-badge" data-status={change.statusCode}>
-          {displayStatusCode(change.statusCode)}
-        </span>
+        {virtualDirectory ? (
+          <span className="change-context-folder-icon"><Icon name="folderOpen" size={16} /></span>
+        ) : (
+          <span className="status-badge" data-status={change.statusCode}>
+            {displayStatusCode(change.statusCode)}
+          </span>
+        )}
         <span>
           <strong title={change.relativePath}>{change.name}</strong>
           <small title={change.relativePath}>{change.relativePath}</small>
         </span>
+        {scopeDirectory && <span className="change-context-scope-chip">扫描范围</span>}
         {conflicted && (
           <span className="change-context-conflict" title={conflictLabel(change)}>
             <Icon name="conflict" size={12} />
@@ -175,43 +193,47 @@ export function ChangeContextMenu({
         />
       </div>
 
-      <div className="change-context-separator" />
-      <div className="change-context-section">
-        <MenuItem
-          icon="commit"
-          label="单独提交此项…"
-          hint="TortoiseSVN"
-          disabled={workspaceUpdating || !capabilities.canCommit}
-          title={workspaceUpdating
-            ? updateBlockedTitle
-            : capabilities.canCommit
-            ? "只将此项目标交给 TortoiseSVN 提交窗口"
-            : unavailableTitle
-              ?? (conflicted
-                ? "请先解决冲突后再提交"
-                : change.contextOnly
-                  ? "层级分组不是独立变更，请选择其中的具体变更"
-                  : "未版本化目录不能作为精确单项提交目标")}
-          onSelect={() => choose("commit")}
-        />
-      </div>
+      {!virtualDirectory && (
+        <>
+          <div className="change-context-separator" />
+          <div className="change-context-section">
+            <MenuItem
+              icon="commit"
+              label="单独提交此项…"
+              hint="TortoiseSVN"
+              disabled={workspaceUpdating || !capabilities.canCommit}
+              title={workspaceUpdating
+                ? updateBlockedTitle
+                : capabilities.canCommit
+                ? "只将此项目标交给 TortoiseSVN 提交窗口"
+                : unavailableTitle
+                  ?? (conflicted
+                    ? "请先解决冲突后再提交"
+                    : "未版本化目录不能作为精确单项提交目标")}
+              onSelect={() => choose("commit")}
+            />
+          </div>
+        </>
+      )}
 
       {conflicted && (
         <>
           <div className="change-context-separator" />
           <div className="change-context-section conflict-actions">
-            <MenuItem
-              icon="conflict"
-              label="打开冲突编辑器…"
-              hint="Resolve"
-              disabled={workspaceUpdating || !capabilities.canConflictEditor}
-              title={workspaceUpdating
-                ? updateBlockedTitle
-                : capabilities.canConflictEditor
-                ? "使用 TortoiseSVN 配置的三方合并工具打开"
-                : unavailableTitle ?? "仅文本文件冲突可打开三方冲突编辑器"}
-              onSelect={() => choose("conflictEditor")}
-            />
+            {!change.isDirectory && (
+              <MenuItem
+                icon="conflict"
+                label="打开冲突编辑器…"
+                hint="Resolve"
+                disabled={workspaceUpdating || !capabilities.canConflictEditor}
+                title={workspaceUpdating
+                  ? updateBlockedTitle
+                  : capabilities.canConflictEditor
+                  ? "使用 TortoiseSVN 配置的三方合并工具打开"
+                  : unavailableTitle ?? "仅文本文件冲突可打开三方冲突编辑器"}
+                onSelect={() => choose("conflictEditor")}
+              />
+            )}
             <MenuItem
               icon="check"
               label="标记为已解决…"
@@ -227,46 +249,53 @@ export function ChangeContextMenu({
         </>
       )}
 
-      <div className="change-context-separator" />
-      <div className="change-context-section">
-        <MenuItem
-          icon="undo"
-          label="Revert 修改…"
-          disabled={workspaceUpdating || !capabilities.canRevert}
-          title={workspaceUpdating
-            ? updateBlockedTitle
-            : capabilities.canRevert
-            ? "打开 TortoiseSVN Revert 确认窗口，不会静默还原"
-            : unavailableTitle
-              ?? (change.contextOnly
-                ? "层级分组不是独立变更，请选择其中的具体变更"
-                : "未版本化项目没有可还原的 BASE 内容")}
-          danger
-          onSelect={() => choose("revert")}
-        />
-        <MenuItem
-          icon="blame"
-          label="追溯（Blame）…"
-          disabled={workspaceUpdating || !capabilities.canBlame}
-          title={workspaceUpdating
-            ? updateBlockedTitle
-            : capabilities.canBlame
-            ? "打开 TortoiseSVN Blame 范围窗口"
-            : unavailableTitle ?? "Blame 仅适用于有仓库历史的版本化文件"}
-          onSelect={() => choose("blame")}
-        />
-        <MenuItem
-          icon="history"
-          label="显示日志（Show Log）…"
-          disabled={workspaceUpdating || !capabilities.canShowLog}
-          title={workspaceUpdating
-            ? updateBlockedTitle
-            : capabilities.canShowLog
-            ? "显示此项目的 SVN 提交历史"
-            : unavailableTitle ?? "未版本化项目没有仓库日志"}
-          onSelect={() => choose("showLog")}
-        />
-      </div>
+      {showRepositorySection && (
+        <>
+          <div className="change-context-separator" />
+          <div className="change-context-section">
+            {showRevert && (
+              <MenuItem
+                icon="undo"
+                label="Revert 修改…"
+                disabled={workspaceUpdating || !capabilities.canRevert}
+                title={workspaceUpdating
+                  ? updateBlockedTitle
+                  : capabilities.canRevert
+                  ? "打开 TortoiseSVN Revert 确认窗口，不会静默还原"
+                  : unavailableTitle ?? "未版本化项目没有可还原的 BASE 内容"}
+                danger
+                onSelect={() => choose("revert")}
+              />
+            )}
+            {showBlame && (
+              <MenuItem
+                icon="blame"
+                label="追溯（Blame）…"
+                disabled={workspaceUpdating || !capabilities.canBlame}
+                title={workspaceUpdating
+                  ? updateBlockedTitle
+                  : capabilities.canBlame
+                  ? "打开 TortoiseSVN Blame 范围窗口"
+                  : unavailableTitle ?? "Blame 仅适用于有仓库历史的版本化文件"}
+                onSelect={() => choose("blame")}
+              />
+            )}
+            {showLog && (
+              <MenuItem
+                icon="history"
+                label="显示日志（Show Log）…"
+                disabled={workspaceUpdating || !capabilities.canShowLog}
+                title={workspaceUpdating
+                  ? updateBlockedTitle
+                  : capabilities.canShowLog
+                  ? "显示此项目的 SVN 提交历史"
+                  : unavailableTitle ?? "未版本化项目没有仓库日志"}
+                onSelect={() => choose("showLog")}
+              />
+            )}
+          </div>
+        </>
+      )}
 
       <div className="change-context-separator" />
       <div className="change-context-section">
@@ -297,6 +326,19 @@ export function ChangeContextMenu({
           onSelect={() => choose("copyFullPath")}
         />
       </div>
+      {scopeDirectory && canRemoveScope && (
+        <>
+          <div className="change-context-separator" />
+          <div className="change-context-section">
+            <MenuItem
+              icon="close"
+              label="移出扫描范围"
+              title="停止扫描此目录；不会删除或修改磁盘文件"
+              onSelect={() => choose("removeScope")}
+            />
+          </div>
+        </>
+      )}
       <div className="change-context-footer">↑ ↓ 选择 · Enter 执行 · Esc 关闭</div>
     </div>
   );

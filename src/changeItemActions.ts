@@ -6,6 +6,7 @@ export type ChangeItemAction =
   | "reveal"
   | "copyRelativePath"
   | "copyFullPath"
+  | "removeScope"
   | "commit"
   | "revert"
   | "blame"

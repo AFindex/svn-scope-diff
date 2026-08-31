@@ -27,12 +27,13 @@ import type {
   WorkingCopyWatcherStatus,
 } from "./types";
 import { ChangesPanel } from "./components/ChangesPanel";
+import { ChangeContextMenu } from "./components/ChangeContextMenu";
 import { DiffPane } from "./components/DiffPane";
 import { Icon } from "./components/Icons";
 import type { ChangeItemAction } from "./changeItemActions";
 import { DiffCache, sameFingerprint } from "./diffCache";
 import { textDiffChanges } from "./textDiffFiles";
-import { mergeScanPatch, patchTouchesPath } from "./scanPatch";
+import { mergeScanPatch, patchTouchesPath, relativeChangePath } from "./scanPatch";
 import {
   ancestorDirectorySelectionKeys,
   expandCommitSelectionKeys,
@@ -90,6 +91,13 @@ interface BulkDiffCounters {
   failed: number;
 }
 
+interface ScopeContextMenuState {
+  change: ChangeEntry;
+  x: number;
+  y: number;
+  returnFocus?: HTMLElement;
+}
+
 const DIFF_CACHE_LIMIT = 12;
 const FILE_CHECK_INTERVAL_MS = 1500;
 const BULK_DIFF_CONCURRENCY = 3;
@@ -129,6 +137,22 @@ function initialSidebarWidth() {
 
 function normalizedPath(path: string) {
   return path.replace(/[\\/]+$/, "").toLowerCase();
+}
+
+function scopeDirectoryChange(directory: string, scan: ScanResult): ChangeEntry {
+  return {
+    path: directory,
+    relativePath: relativeChangePath(directory, scan.directory),
+    name: folderName(directory),
+    item: "normal",
+    properties: "none",
+    statusCode: "•",
+    isDirectory: true,
+    treeConflicted: false,
+    baseRevision: scan.revision,
+    contextOnly: true,
+    refreshPaths: [directory],
+  };
 }
 
 async function copyText(text: string) {
@@ -188,6 +212,7 @@ export default function App() {
   const [autoRefreshBusy, setAutoRefreshBusy] = useState(false);
   const [autoRefreshError, setAutoRefreshError] = useState<string>();
   const [partialScanLoading, setPartialScanLoading] = useState(false);
+  const [scopeContextMenu, setScopeContextMenu] = useState<ScopeContextMenuState>();
   const diffCacheRef = useRef(new DiffCache(DIFF_CACHE_LIMIT));
   const scanRef = useRef<ScanResult | undefined>(undefined);
   const selectedRef = useRef<ChangeEntry | undefined>(undefined);
@@ -1060,6 +1085,31 @@ export default function App() {
     if (result) setToast(`已移除扫描范围：${folderName(directory)}`);
   }, [scan, scanDirectory, scanLoading, svnUpdate.running]);
 
+  const openScopeContextMenu = useCallback((
+    directory: string,
+    x: number,
+    y: number,
+    returnFocus?: HTMLElement,
+  ) => {
+    const current = scanRef.current;
+    if (!current) return;
+    setScopeContextMenu({
+      change: scopeDirectoryChange(directory, current),
+      x,
+      y,
+      returnFocus,
+    });
+  }, []);
+
+  const closeScopeContextMenu = useCallback((restoreFocus = false) => {
+    setScopeContextMenu((current) => {
+      if (restoreFocus && current?.returnFocus) {
+        window.requestAnimationFrame(() => current.returnFocus?.focus());
+      }
+      return undefined;
+    });
+  }, []);
+
   const refresh = useCallback(async () => {
     if (!scan?.scopeDirectories.length || scanLoading || svnUpdate.running || svnUpdateLaunching) return;
     const result = await scanDirectory(scan.scopeDirectories, true);
@@ -1115,12 +1165,16 @@ export default function App() {
 
   const handleItemAction = useCallback(async (action: ChangeItemAction, change: ChangeEntry) => {
     if (!scan) return;
+    if (action === "removeScope") {
+      await removeScanDirectory(change.path);
+      return;
+    }
     if (action === "refresh") {
       if (scanLoading || partialScanLoading || svnUpdate.running) {
         setToast("当前已有扫描或 SVN Update 正在运行，请稍后再刷新此项");
         return;
       }
-      await refreshChangedPaths([change.path], true);
+      await refreshChangedPaths(change.refreshPaths?.length ? change.refreshPaths : [change.path], true);
       return;
     }
     if (
@@ -1161,6 +1215,7 @@ export default function App() {
     launchTortoiseCommit,
     partialScanLoading,
     refreshChangedPaths,
+    removeScanDirectory,
     scan,
     scanLoading,
     svnUpdate.running,
@@ -1312,7 +1367,34 @@ export default function App() {
               </div>
               <div className="scope-directory-list">
                 {scan.scopeDirectories.map((directory) => (
-                  <div className="scope-directory-item" key={normalizedPath(directory)}>
+                  <div
+                    className={`scope-directory-item ${normalizedPath(scopeContextMenu?.change.path ?? "") === normalizedPath(directory) ? "context-open" : ""}`}
+                    key={normalizedPath(directory)}
+                    tabIndex={0}
+                    role="group"
+                    aria-label={`${folderName(directory)} 扫描目录；右键打开目录菜单`}
+                    onContextMenu={(event) => {
+                      event.preventDefault();
+                      const bounds = event.currentTarget.getBoundingClientRect();
+                      openScopeContextMenu(
+                        directory,
+                        event.clientX || bounds.left + 24,
+                        event.clientY || bounds.bottom,
+                        event.currentTarget,
+                      );
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
+                      event.preventDefault();
+                      const bounds = event.currentTarget.getBoundingClientRect();
+                      openScopeContextMenu(
+                        directory,
+                        bounds.left + 28,
+                        bounds.bottom - 4,
+                        event.currentTarget,
+                      );
+                    }}
+                  >
                     <Icon name="folder" size={13} />
                     <span>
                       <strong title={directory}>{folderName(directory)}</strong>
@@ -1362,6 +1444,7 @@ export default function App() {
 
             <ChangesPanel
               directory={scan.directory}
+              scopeDirectories={scan.scopeDirectories}
               changes={scan.changes}
               selectedPath={selected?.path}
               selectedCommitPaths={commitSelection}
@@ -1454,6 +1537,23 @@ export default function App() {
         )}
         <span>本地模式</span>
       </footer>
+
+      {scopeContextMenu && scan && (
+        <ChangeContextMenu
+          change={scopeContextMenu.change}
+          x={scopeContextMenu.x}
+          y={scopeContextMenu.y}
+          tortoiseAvailable={tortoiseSvn?.available ?? false}
+          workspaceUpdating={svnUpdate.running}
+          scopeDirectory
+          canRemoveScope={scan.scopeDirectories.length > 1
+            && !scanLoading
+            && !svnUpdate.running
+            && !svnUpdateLaunching}
+          onAction={(action, change) => void handleItemAction(action, change)}
+          onClose={closeScopeContextMenu}
+        />
+      )}
 
       {pendingFileUpdate && (
         <div className="file-update-backdrop">

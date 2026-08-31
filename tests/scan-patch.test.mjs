@@ -8,7 +8,13 @@ const sourcePath = fileURLToPath(new URL("../src/scanPatch.ts", import.meta.url)
 const source = await readFile(sourcePath, "utf8");
 const { code: compiled } = await transformWithOxc(source, sourcePath);
 const moduleUrl = `data:text/javascript;base64,${Buffer.from(compiled).toString("base64")}`;
-const { changePathIsWithin, mergeScanPatch, patchTouchesPath } = await import(moduleUrl);
+const {
+  changePathIsWithin,
+  mergeScanPatch,
+  patchTouchesPath,
+  refreshTargetsForDirectory,
+  relativeChangePath,
+} = await import(moduleUrl);
 
 function change(path, relativePath, item = "modified") {
   return {
@@ -46,4 +52,18 @@ test("replaces only the refreshed subtree and keeps unrelated changes", () => {
   );
   assert.equal(patchTouchesPath(patch, "F:\\wc\\src\\nested\\old.cs"), true);
   assert.equal(patchTouchesPath(patch, "F:\\wc\\tools\\keep.cs"), false);
+});
+
+test("chooses safe refresh targets for real and grouping directories", () => {
+  const scopes = ["F:\\wc\\feature-a\\src", "F:\\wc\\feature-b\\src"];
+  assert.deepEqual(
+    refreshTargetsForDirectory("F:\\wc\\feature-a\\src\\nested", scopes),
+    ["F:\\wc\\feature-a\\src\\nested"],
+  );
+  assert.deepEqual(
+    refreshTargetsForDirectory("F:\\wc\\feature-a", scopes),
+    ["F:\\wc\\feature-a\\src"],
+  );
+  assert.deepEqual(refreshTargetsForDirectory("F:\\wc", scopes), scopes);
+  assert.equal(relativeChangePath("F:\\wc\\feature-a\\src", "f:/wc"), "feature-a/src");
 });

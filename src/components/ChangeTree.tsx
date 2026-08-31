@@ -2,12 +2,14 @@ import { useMemo, useState } from "react";
 import { conflictLabel, isConflictedChange } from "../changeItemActions";
 import { commitPathKey, isCommitSelectable } from "../commitSelection";
 import { displayStatusCode } from "../status";
+import { refreshTargetsForDirectory } from "../scanPatch";
 import type { ChangeEntry, TreeNode } from "../types";
 import { Icon } from "./Icons";
 import { SelectionCheckbox, type SelectionState } from "./SelectionCheckbox";
 
 interface ChangeTreeProps {
   scopeDirectory: string;
+  scopeDirectories: string[];
   changes: ChangeEntry[];
   selectedPath?: string;
   selectedCommitPaths: ReadonlySet<string>;
@@ -23,7 +25,15 @@ interface ChangeTreeProps {
 }
 
 function makeNode(key: string, name: string, isFolder: boolean): TreeNode {
-  return { key, name, isFolder, children: [], selectableChanges: [], conflictCount: 0 };
+  return {
+    key,
+    name,
+    isFolder,
+    children: [],
+    selectableChanges: [],
+    conflictCount: 0,
+    baseRevision: null,
+  };
 }
 
 function buildTree(changes: ChangeEntry[]): TreeNode[] {
@@ -48,6 +58,9 @@ function buildTree(changes: ChangeEntry[]): TreeNode[] {
         node.isFolder = change.isDirectory || node.children.length > 0;
       }
       if (isCommitSelectable(change)) node.selectableChanges.push(change);
+      if (node.baseRevision === null && change.baseRevision !== null) {
+        node.baseRevision = change.baseRevision;
+      }
       if (conflicted) node.conflictCount += 1;
       parent = node;
     });
@@ -84,12 +97,17 @@ function statusTitle(change?: ChangeEntry) {
   return change.properties === "modified" && change.item !== "normal" ? `${base} + 属性修改` : base;
 }
 
-function contextChangeForNode(node: TreeNode, scopeDirectory: string): ChangeEntry {
+function contextChangeForNode(
+  node: TreeNode,
+  scopeDirectory: string,
+  scopeDirectories: string[],
+): ChangeEntry {
   if (node.change) return node.change;
   const separator = scopeDirectory.includes("\\") ? "\\" : "/";
   const relativePath = node.key.replaceAll("/", separator);
+  const path = `${scopeDirectory.replace(/[\\/]+$/, "")}${separator}${relativePath}`;
   return {
-    path: `${scopeDirectory.replace(/[\\/]+$/, "")}${separator}${relativePath}`,
+    path,
     relativePath: node.key,
     name: node.name,
     item: "normal",
@@ -97,13 +115,15 @@ function contextChangeForNode(node: TreeNode, scopeDirectory: string): ChangeEnt
     statusCode: "•",
     isDirectory: true,
     treeConflicted: false,
-    baseRevision: node.selectableChanges.find((change) => change.baseRevision)?.baseRevision ?? null,
+    baseRevision: node.baseRevision,
     contextOnly: true,
+    refreshPaths: refreshTargetsForDirectory(path, scopeDirectories),
   };
 }
 
 export function ChangeTree({
   scopeDirectory,
+  scopeDirectories,
   changes,
   selectedPath,
   selectedCommitPaths,
@@ -148,7 +168,7 @@ export function ChangeTree({
     const isCollapsed = collapsed.has(node.key);
     const isSelected = node.change?.path === selectedPath;
     const directConflict = Boolean(node.change && isConflictedChange(node.change));
-    const contextChange = contextChangeForNode(node, scopeDirectory);
+    const contextChange = contextChangeForNode(node, scopeDirectory, scopeDirectories);
     const commitChanges = node.selectableChanges;
     const commitSelectedCount = selectedCounts.get(node.key) ?? 0;
     const selectionState: SelectionState = commitSelectedCount === 0

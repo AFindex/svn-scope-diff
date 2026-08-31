@@ -21,6 +21,7 @@ import { Icon } from "./Icons";
 
 interface ChangesPanelProps {
   directory: string;
+  scopeDirectories: string[];
   changes: ChangeEntry[];
   selectedPath?: string;
   selectedCommitPaths: ReadonlySet<string>;
@@ -76,6 +77,7 @@ function SearchField({ value, placeholder, ariaLabel, className = "", onChange }
 
 export function ChangesPanel({
   directory,
+  scopeDirectories,
   changes,
   selectedPath,
   selectedCommitPaths,
@@ -149,7 +151,11 @@ export function ChangesPanel({
   }, [typeOptions]);
 
   useEffect(() => {
-    if (contextMenu && !changes.some((change) => change.path === contextMenu.change.path)) {
+    if (
+      contextMenu
+      && !contextMenu.change.contextOnly
+      && !changes.some((change) => change.path === contextMenu.change.path)
+    ) {
       setContextMenu(undefined);
     }
   }, [changes, contextMenu]);
@@ -405,6 +411,7 @@ export function ChangesPanel({
           changeView === "tree" ? (
             <ChangeTree
               scopeDirectory={directory}
+              scopeDirectories={scopeDirectories}
               changes={changes}
               selectedPath={selectedPath}
               selectedCommitPaths={selectedCommitPaths}

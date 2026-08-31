@@ -9,6 +9,7 @@ export interface ChangeEntry {
   treeConflicted: boolean;
   baseRevision: string | null;
   contextOnly?: boolean;
+  refreshPaths?: string[];
 }
 
 export interface ToolAvailability {
@@ -102,5 +103,6 @@ export interface TreeNode {
   children: TreeNode[];
   selectableChanges: ChangeEntry[];
   conflictCount: number;
+  baseRevision: string | null;
   change?: ChangeEntry;
 }

@@ -394,6 +394,19 @@ button:disabled {
   border: 1px solid #e8eaf0;
   border-radius: 5px;
   background: #fafbfc;
+  outline: 0;
+  transition: border-color 120ms, background 120ms, box-shadow 120ms;
+}
+
+.scope-directory-item:hover,
+.scope-directory-item:focus-visible,
+.scope-directory-item.context-open {
+  border-color: #c5d0ea;
+  background: #f4f7ff;
+}
+
+.scope-directory-item:focus-visible {
+  box-shadow: 0 0 0 2px #dce5fb;
 }
 
 .scope-directory-item > span {
@@ -2844,6 +2857,32 @@ button:disabled {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.change-context-folder-icon {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  place-items: center;
+  color: #5271bd;
+  border: 1px solid #d8e1f5;
+  border-radius: 6px;
+  background: #eef3ff;
+}
+
+.change-context-scope-chip {
+  display: inline-flex;
+  height: 20px;
+  flex: 0 0 auto;
+  align-items: center;
+  padding: 0 6px;
+  color: #5269a7;
+  border: 1px solid #d8e1f5;
+  border-radius: 5px;
+  background: #f1f5ff;
+  font-size: 9px;
+  font-weight: 650;
 }
 
 .change-context-header strong {
