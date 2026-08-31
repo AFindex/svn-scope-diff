@@ -17,10 +17,14 @@ import type {
   DiffResult,
   FileFingerprint,
   ScanResult,
+  ScanPatch,
   SvnUpdateFinished,
   SvnUpdateStatus,
   ToolAvailability,
   TortoiseSvnAvailability,
+  WorkingCopyChanged,
+  WorkingCopyWatchError,
+  WorkingCopyWatcherStatus,
 } from "./types";
 import { ChangesPanel } from "./components/ChangesPanel";
 import { DiffPane } from "./components/DiffPane";
@@ -28,6 +32,7 @@ import { Icon } from "./components/Icons";
 import type { ChangeItemAction } from "./changeItemActions";
 import { DiffCache, sameFingerprint } from "./diffCache";
 import { textDiffChanges } from "./textDiffFiles";
+import { mergeScanPatch, patchTouchesPath } from "./scanPatch";
 import {
   ancestorDirectorySelectionKeys,
   expandCommitSelectionKeys,
@@ -95,9 +100,13 @@ function idleSvnUpdateStatus(): SvnUpdateStatus {
     running: false,
     updateId: null,
     pid: null,
-    directory: null,
+    directories: [],
     cancelRequested: false,
   };
+}
+
+function scopeSetKey(directories: readonly string[]) {
+  return directories.map(normalizedPath).sort().join("|");
 }
 
 function currentViewportWidth() {
@@ -175,7 +184,12 @@ export default function App() {
   const [sidebarResizing, setSidebarResizing] = useState(false);
   const [svnUpdate, setSvnUpdate] = useState<SvnUpdateStatus>(idleSvnUpdateStatus);
   const [svnUpdateLaunching, setSvnUpdateLaunching] = useState(false);
+  const [watcherStatus, setWatcherStatus] = useState<WorkingCopyWatcherStatus>();
+  const [autoRefreshBusy, setAutoRefreshBusy] = useState(false);
+  const [autoRefreshError, setAutoRefreshError] = useState<string>();
+  const [partialScanLoading, setPartialScanLoading] = useState(false);
   const diffCacheRef = useRef(new DiffCache(DIFF_CACHE_LIMIT));
+  const scanRef = useRef<ScanResult | undefined>(undefined);
   const selectedRef = useRef<ChangeEntry | undefined>(undefined);
   const watchBaselineRef = useRef<{ path: string; fingerprint: FileFingerprint } | undefined>(undefined);
   const pendingFileUpdateRef = useRef<PendingFileUpdate | undefined>(undefined);
@@ -185,6 +199,11 @@ export default function App() {
   const workspaceRef = useRef<HTMLDivElement | null>(null);
   const sidebarWidthRef = useRef(sidebarWidth);
   const finishedUpdateIdsRef = useRef(new Set<number>());
+  const watcherIdRef = useRef<number | null>(null);
+  const scanLoadingRef = useRef(false);
+  const svnUpdateRunningRef = useRef(false);
+  const pendingAutoRefreshPathsRef = useRef(new Map<string, string>());
+  const autoRefreshRunningRef = useRef(false);
   const sidebarDragRef = useRef<{
     pointerId: number;
     startX: number;
@@ -199,6 +218,18 @@ export default function App() {
   useEffect(() => {
     selectedRef.current = selected;
   }, [selected]);
+
+  useEffect(() => {
+    scanRef.current = scan;
+  }, [scan]);
+
+  useEffect(() => {
+    scanLoadingRef.current = scanLoading;
+  }, [scanLoading]);
+
+  useEffect(() => {
+    svnUpdateRunningRef.current = svnUpdate.running;
+  }, [svnUpdate.running]);
 
   const previewSidebarWidth = useCallback((width: number) => {
     const nextWidth = clampSidebarWidth(width, currentViewportWidth());
@@ -290,14 +321,19 @@ export default function App() {
     setFileReloadError(undefined);
   }, []);
 
-  const scanDirectory = useCallback(async (directory: string, preserveSelection = false) => {
+  const scanDirectory = useCallback(async (
+    directoryOrDirectories: string | string[],
+    preserveSelection = false,
+  ) => {
+    const directories = Array.isArray(directoryOrDirectories)
+      ? directoryOrDirectories
+      : [directoryOrDirectories];
     bulkDiffRunRef.current += 1;
     bulkDiffRunningRef.current = false;
     setBulkDiffProgress(undefined);
-    const nextDirectory = normalizedPath(directory);
+    const nextDirectory = scopeSetKey(directories);
     const directoryChanged = activeScanDirectoryRef.current !== nextDirectory;
     if (directoryChanged) {
-      activeScanDirectoryRef.current = nextDirectory;
       diffCacheRef.current.clear();
       diffCacheRef.current.setLimit(DIFF_CACHE_LIMIT);
     }
@@ -305,7 +341,9 @@ export default function App() {
     setScanError(undefined);
     setToast(undefined);
     try {
-      const result = await invoke<ScanResult>("scan_changes", { directory });
+      const result = await invoke<ScanResult>("scan_changes", { directories });
+      activeScanDirectoryRef.current = scopeSetKey(result.scopeDirectories);
+      scanRef.current = result;
       setScan(result);
       setCommitSelection((current) => directoryChanged
         ? new Set()
@@ -325,6 +363,7 @@ export default function App() {
     } catch (error) {
       setScanError(errorMessage(error));
       if (!preserveSelection) {
+        scanRef.current = undefined;
         setScan(undefined);
         setSelected(undefined);
         setDiff(undefined);
@@ -334,6 +373,162 @@ export default function App() {
     } finally {
       setScanLoading(false);
     }
+  }, []);
+
+  const applyScanPatch = useCallback((patch: ScanPatch) => {
+    const current = scanRef.current;
+    if (!current || !patch.roots.length) return current;
+
+    const changes = mergeScanPatch(current.changes, patch);
+    const updated = { ...current, changes };
+    scanRef.current = updated;
+    setScan(updated);
+    setCommitSelection((selection) => reconcileCommitSelection(selection, changes));
+
+    const currentSelected = selectedRef.current;
+    const nextSelected = currentSelected
+      ? changes.find((change) => normalizedPath(change.path) === normalizedPath(currentSelected.path))
+        ?? changes[0]
+      : changes[0];
+    selectedRef.current = nextSelected;
+    setSelected(nextSelected);
+    if (!nextSelected) {
+      setDiff(undefined);
+      setDiffError(undefined);
+    } else if (
+      currentSelected
+      && normalizedPath(currentSelected.path) === normalizedPath(nextSelected.path)
+      && patchTouchesPath(patch, currentSelected.path)
+    ) {
+      // Do not silently replace an open diff. The existing fingerprint watcher
+      // asks the user whether the changed working file should be reloaded.
+      setPropertyDiffState(undefined);
+    }
+    return updated;
+  }, []);
+
+  const refreshChangedPaths = useCallback(async (paths: string[], announce: boolean) => {
+    const current = scanRef.current;
+    if (!current || !paths.length || svnUpdateRunningRef.current) return undefined;
+    if (announce) setPartialScanLoading(true);
+    try {
+      const patch = await invoke<ScanPatch>("scan_changed_paths", {
+        scopeDirectories: current.scopeDirectories,
+        paths,
+        displayRoot: current.directory,
+        wcRoot: current.wcRoot,
+      });
+      const latest = scanRef.current;
+      if (!latest || scopeSetKey(latest.scopeDirectories) !== scopeSetKey(current.scopeDirectories)) {
+        return undefined;
+      }
+      const updated = applyScanPatch(patch);
+      if (announce && updated) {
+        setToast(`局部刷新完成：当前共 ${updated.changes.length} 项变更`);
+      }
+      return updated;
+    } catch (error) {
+      const message = errorMessage(error);
+      if (announce) setToast(message);
+      else setAutoRefreshError(message);
+      return undefined;
+    } finally {
+      if (announce) setPartialScanLoading(false);
+    }
+  }, [applyScanPatch]);
+
+  const flushAutoRefreshQueue = useCallback(async () => {
+    if (autoRefreshRunningRef.current) return;
+    autoRefreshRunningRef.current = true;
+    setAutoRefreshBusy(true);
+    try {
+      while (
+        pendingAutoRefreshPathsRef.current.size
+        && !scanLoadingRef.current
+        && !svnUpdateRunningRef.current
+      ) {
+        const paths = [...pendingAutoRefreshPathsRef.current.values()];
+        pendingAutoRefreshPathsRef.current.clear();
+        await refreshChangedPaths(paths, false);
+      }
+    } finally {
+      autoRefreshRunningRef.current = false;
+      setAutoRefreshBusy(false);
+    }
+  }, [refreshChangedPaths]);
+
+  useEffect(() => {
+    let active = true;
+    let unlistenChanged: (() => void) | undefined;
+    let unlistenError: (() => void) | undefined;
+
+    const setup = async () => {
+      const [stopChanged, stopError] = await Promise.all([
+        listen<WorkingCopyChanged>("working-copy-changed", (event) => {
+          if (
+            event.payload.watcherId !== watcherIdRef.current
+            || scanLoadingRef.current
+            || svnUpdateRunningRef.current
+          ) return;
+          for (const path of event.payload.paths) {
+            pendingAutoRefreshPathsRef.current.set(normalizedPath(path), path);
+          }
+          void flushAutoRefreshQueue();
+        }),
+        listen<WorkingCopyWatchError>("working-copy-watch-error", (event) => {
+          if (event.payload.watcherId === watcherIdRef.current) {
+            setAutoRefreshError(event.payload.message);
+          }
+        }),
+      ]);
+      if (!active) {
+        stopChanged();
+        stopError();
+        return;
+      }
+      unlistenChanged = stopChanged;
+      unlistenError = stopError;
+    };
+
+    void setup().catch((error) => setAutoRefreshError(errorMessage(error)));
+    return () => {
+      active = false;
+      unlistenChanged?.();
+      unlistenError?.();
+    };
+  }, [flushAutoRefreshQueue]);
+
+  const activeScopeKey = scan ? scopeSetKey(scan.scopeDirectories) : "";
+  useEffect(() => {
+    let active = true;
+    const current = scanRef.current;
+    if (!current || svnUpdate.running) {
+      watcherIdRef.current = null;
+      setWatcherStatus(undefined);
+      pendingAutoRefreshPathsRef.current.clear();
+      void invoke<WorkingCopyWatcherStatus>("stop_working_copy_watcher").catch(() => undefined);
+      return () => { active = false; };
+    }
+
+    watcherIdRef.current = null;
+    setWatcherStatus(undefined);
+    pendingAutoRefreshPathsRef.current.clear();
+    setAutoRefreshError(undefined);
+    void invoke<WorkingCopyWatcherStatus>("start_working_copy_watcher", {
+      directories: current.scopeDirectories,
+      wcRoot: current.wcRoot,
+    }).then((status) => {
+      if (!active || scopeSetKey(status.directories) !== activeScopeKey) return;
+      watcherIdRef.current = status.watcherId;
+      setWatcherStatus(status);
+    }).catch((error) => {
+      if (active) setAutoRefreshError(errorMessage(error));
+    });
+    return () => { active = false; };
+  }, [activeScopeKey, scan?.wcRoot, svnUpdate.running]);
+
+  useEffect(() => () => {
+    void invoke("stop_working_copy_watcher").catch(() => undefined);
   }, []);
 
   useEffect(() => {
@@ -349,8 +544,8 @@ export default function App() {
 
       void (async () => {
         let refreshMessage = "";
-        if (normalizedPath(finished.directory) === activeScanDirectoryRef.current) {
-          const result = await scanDirectory(finished.directory, true);
+        if (scopeSetKey(finished.directories) === activeScanDirectoryRef.current) {
+          const result = await scanDirectory(finished.directories, true);
           if (!active) return;
           refreshMessage = result
             ? ` 已重新扫描：${result.changes.length} 项变更。`
@@ -508,7 +703,14 @@ export default function App() {
     return () => {
       active = false;
     };
-  }, [requestFileReload, selected, storeDiffCache]);
+  }, [
+    requestFileReload,
+    selected?.baseRevision,
+    selected?.isDirectory,
+    selected?.item,
+    selected?.path,
+    storeDiffCache,
+  ]);
 
   useEffect(() => {
     if (!selected || selected.isDirectory || !diff || svnUpdate.running) return;
@@ -788,14 +990,14 @@ export default function App() {
     watchBaselineRef.current = undefined;
     try {
       const status = await invoke<SvnUpdateStatus>("start_svn_update", {
-        directory: scan.directory,
+        directories: scan.scopeDirectories,
         wcRoot: scan.wcRoot,
       });
       const finishedBeforeResponse = status.updateId !== null
         && finishedUpdateIdsRef.current.has(status.updateId);
       if (!finishedBeforeResponse) {
         setSvnUpdate(status);
-        setToast(`已在独立控制台启动 SVN Update：${scan.directory}`);
+        setToast(`已在独立控制台启动 SVN Update：${scan.scopeDirectories.length} 个扫描范围`);
       }
     } catch (error) {
       setToast(errorMessage(error));
@@ -826,17 +1028,41 @@ export default function App() {
     }
     const selectedDirectory = await open({
       directory: true,
-      multiple: false,
-      title: "选择 SVN 工作副本内的目录",
+      multiple: true,
+      title: "选择一个或多个 SVN 工作副本目录",
     });
-    if (typeof selectedDirectory === "string") {
-      await scanDirectory(selectedDirectory);
+    const directories = typeof selectedDirectory === "string"
+      ? [selectedDirectory]
+      : selectedDirectory;
+    if (directories?.length) {
+      await scanDirectory(directories);
     }
   }, [scanDirectory, svnUpdate.running, svnUpdateLaunching]);
 
+  const addScanDirectory = useCallback(async () => {
+    if (!scan || scanLoading || svnUpdate.running || svnUpdateLaunching) return;
+    const selectedDirectory = await open({
+      directory: true,
+      multiple: false,
+      title: "添加一个扫描目录",
+    });
+    if (typeof selectedDirectory !== "string") return;
+    const result = await scanDirectory([...scan.scopeDirectories, selectedDirectory], true);
+    if (result) setToast(`扫描范围已更新：${result.scopeDirectories.length} 个目录`);
+  }, [scan, scanDirectory, scanLoading, svnUpdate.running, svnUpdateLaunching]);
+
+  const removeScanDirectory = useCallback(async (directory: string) => {
+    if (!scan || scan.scopeDirectories.length <= 1 || scanLoading || svnUpdate.running) return;
+    const remaining = scan.scopeDirectories.filter(
+      (scope) => normalizedPath(scope) !== normalizedPath(directory),
+    );
+    const result = await scanDirectory(remaining, true);
+    if (result) setToast(`已移除扫描范围：${folderName(directory)}`);
+  }, [scan, scanDirectory, scanLoading, svnUpdate.running]);
+
   const refresh = useCallback(async () => {
-    if (!scan?.directory || scanLoading || svnUpdate.running || svnUpdateLaunching) return;
-    const result = await scanDirectory(scan.directory, true);
+    if (!scan?.scopeDirectories.length || scanLoading || svnUpdate.running || svnUpdateLaunching) return;
+    const result = await scanDirectory(scan.scopeDirectories, true);
     if (result) setToast(`已刷新当前目录：${result.changes.length} 项变更`);
   }, [scan, scanDirectory, scanLoading, svnUpdate.running, svnUpdateLaunching]);
 
@@ -889,6 +1115,14 @@ export default function App() {
 
   const handleItemAction = useCallback(async (action: ChangeItemAction, change: ChangeEntry) => {
     if (!scan) return;
+    if (action === "refresh") {
+      if (scanLoading || partialScanLoading || svnUpdate.running) {
+        setToast("当前已有扫描或 SVN Update 正在运行，请稍后再刷新此项");
+        return;
+      }
+      await refreshChangedPaths([change.path], true);
+      return;
+    }
     if (
       svnUpdate.running
       && ["commit", "revert", "blame", "showLog", "conflictEditor", "resolve"].includes(action)
@@ -923,7 +1157,14 @@ export default function App() {
     } catch (error) {
       setToast(errorMessage(error));
     }
-  }, [launchTortoiseCommit, scan, svnUpdate.running]);
+  }, [
+    launchTortoiseCommit,
+    partialScanLoading,
+    refreshChangedPaths,
+    scan,
+    scanLoading,
+    svnUpdate.running,
+  ]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -959,7 +1200,8 @@ export default function App() {
     }
   };
 
-  const rootIsScope = scan?.directory === scan?.wcRoot;
+  const rootIsScope = scan?.scopeDirectories.length === 1
+    && normalizedPath(scan.scopeDirectories[0]) === normalizedPath(scan.wcRoot);
   const activePropertyDiff = propertyDiffState?.path === selected?.path
     ? propertyDiffState
     : undefined;
@@ -971,9 +1213,11 @@ export default function App() {
           <span className="brand-icon"><Icon name="app" size={19} /></span>
           <span>SVN Scope</span>
         </div>
-        <div className="project-title" title={scan?.directory}>
+        <div className="project-title" title={scan?.scopeDirectories.join("\n")}>
           {scan && <span className={`project-dot ${svnUpdate.running ? "updating" : ""}`} />}
-          <strong>{folderName(scan?.directory)}</strong>
+          <strong>{scan && scan.scopeDirectories.length > 1
+            ? `${scan.scopeDirectories.length} 个扫描目录`
+            : folderName(scan?.directory)}</strong>
           {scan && (
             <span className={`change-total ${svnUpdate.running ? "updating" : ""}`}>
               {svnUpdate.running ? "正在 Update" : `${scan.changes.length} 项变更`}
@@ -1063,11 +1307,57 @@ export default function App() {
             <div className="scope-block">
               <div className="scope-heading">
                 <Icon name="repository" size={16} />
-                <span>{rootIsScope ? "工作副本" : "当前范围"}</span>
+                <span>{rootIsScope ? "工作副本" : "扫描范围"}</span>
+                <b>{scan.scopeDirectories.length}</b>
               </div>
-              <strong title={scan.directory}>{folderName(scan.directory)}</strong>
-              <span className="scope-path" title={scan.directory}>{scan.directory}</span>
-              {!rootIsScope && <span className="scope-rule">仅此目录及子目录</span>}
+              <div className="scope-directory-list">
+                {scan.scopeDirectories.map((directory) => (
+                  <div className="scope-directory-item" key={normalizedPath(directory)}>
+                    <Icon name="folder" size={13} />
+                    <span>
+                      <strong title={directory}>{folderName(directory)}</strong>
+                      <small title={directory}>{directory}</small>
+                    </span>
+                    {scan.scopeDirectories.length > 1 && (
+                      <button
+                        type="button"
+                        disabled={scanLoading || svnUpdate.running}
+                        aria-label={`移除扫描目录 ${folderName(directory)}`}
+                        title="移除此扫描范围"
+                        onClick={() => void removeScanDirectory(directory)}
+                      >
+                        <Icon name="close" size={11} />
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+              <div className="scope-actions">
+                <span
+                  className={`scope-watch-status ${autoRefreshError ? "error" : autoRefreshBusy ? "busy" : ""}`}
+                  title={autoRefreshError
+                    ?? (watcherStatus?.watcherId
+                      ? "文件保存后自动局部刷新 SVN 状态"
+                      : "正在启动文件变更监听")}
+                >
+                  <i />
+                  {autoRefreshError
+                    ? "自动刷新异常"
+                    : autoRefreshBusy || partialScanLoading
+                      ? "局部刷新中"
+                      : watcherStatus?.watcherId
+                        ? "自动刷新"
+                        : "启动监听…"}
+                </span>
+                <button
+                  type="button"
+                  disabled={scanLoading || svnUpdate.running || svnUpdateLaunching}
+                  onClick={() => void addScanDirectory()}
+                >
+                  <Icon name="open" size={12} />
+                  添加目录
+                </button>
+              </div>
             </div>
 
             <ChangesPanel
@@ -1142,7 +1432,7 @@ export default function App() {
         <span>{scan ? `SVN ${scan.svnVersion}` : "就绪"}</span>
         {scan?.revision && <span>工作副本 r{scan.revision}</span>}
         {svnUpdate.running && (
-          <span className="svn-update-status" title={svnUpdate.directory ?? undefined}>
+          <span className="svn-update-status" title={svnUpdate.directories.join("\n") || undefined}>
             <span className="spinner" />
             {svnUpdate.cancelRequested
               ? "正在取消 SVN Update"

@@ -5,10 +5,11 @@ mod svn;
 mod svn_update;
 mod system_shell;
 mod tortoise_svn;
+mod working_copy_watcher;
 
 use models::{
-    CommitLaunchResult, DiffResult, FileFingerprint, ScanResult, SvnUpdateStatus, ToolAvailability,
-    TortoiseSvnAvailability,
+    CommitLaunchResult, DiffResult, FileFingerprint, ScanPatch, ScanResult, SvnUpdateStatus,
+    ToolAvailability, TortoiseSvnAvailability, WorkingCopyWatcherStatus,
 };
 use std::path::PathBuf;
 
@@ -20,10 +21,24 @@ fn get_launch_directory(state: tauri::State<'_, LaunchDirectory>) -> Option<Stri
 }
 
 #[tauri::command]
-async fn scan_changes(directory: String) -> Result<ScanResult, String> {
-    tauri::async_runtime::spawn_blocking(move || svn::scan(&directory))
+async fn scan_changes(directories: Vec<String>) -> Result<ScanResult, String> {
+    tauri::async_runtime::spawn_blocking(move || svn::scan_scopes(&directories))
         .await
         .map_err(|error| format!("扫描任务异常结束：{error}"))?
+}
+
+#[tauri::command]
+async fn scan_changed_paths(
+    scope_directories: Vec<String>,
+    paths: Vec<String>,
+    display_root: String,
+    wc_root: String,
+) -> Result<ScanPatch, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        svn::scan_changed_paths(&scope_directories, &paths, &display_root, &wc_root)
+    })
+    .await
+    .map_err(|error| format!("局部扫描任务异常结束：{error}"))?
 }
 
 #[tauri::command]
@@ -127,10 +142,10 @@ fn get_svn_update_status(
 fn start_svn_update(
     app: tauri::AppHandle,
     state: tauri::State<'_, svn_update::SvnUpdateManager>,
-    directory: String,
+    directories: Vec<String>,
     wc_root: String,
 ) -> Result<SvnUpdateStatus, String> {
-    svn_update::start(app, &state, &directory, &wc_root)
+    svn_update::start(app, &state, &directories, &wc_root)
 }
 
 #[tauri::command]
@@ -139,6 +154,30 @@ fn cancel_svn_update(
     update_id: u64,
 ) -> Result<SvnUpdateStatus, String> {
     svn_update::cancel(&state, update_id)
+}
+
+#[tauri::command]
+fn get_working_copy_watcher_status(
+    state: tauri::State<'_, working_copy_watcher::WorkingCopyWatcherManager>,
+) -> Result<WorkingCopyWatcherStatus, String> {
+    working_copy_watcher::status(&state)
+}
+
+#[tauri::command]
+fn start_working_copy_watcher(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, working_copy_watcher::WorkingCopyWatcherManager>,
+    directories: Vec<String>,
+    wc_root: String,
+) -> Result<WorkingCopyWatcherStatus, String> {
+    working_copy_watcher::start(app, &state, &directories, &wc_root)
+}
+
+#[tauri::command]
+fn stop_working_copy_watcher(
+    state: tauri::State<'_, working_copy_watcher::WorkingCopyWatcherManager>,
+) -> Result<WorkingCopyWatcherStatus, String> {
+    working_copy_watcher::stop(&state)
 }
 
 fn launch_directory() -> Option<String> {
@@ -160,11 +199,13 @@ pub fn run() {
     tauri::Builder::default()
         .manage(LaunchDirectory(launch_directory()))
         .manage(svn_update::SvnUpdateManager::default())
+        .manage(working_copy_watcher::WorkingCopyWatcherManager::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             get_launch_directory,
             scan_changes,
+            scan_changed_paths,
             get_beyond_compare_availability,
             get_tortoise_svn_availability,
             get_file_diff,
@@ -176,7 +217,10 @@ pub fn run() {
             open_change_path,
             get_svn_update_status,
             start_svn_update,
-            cancel_svn_update
+            cancel_svn_update,
+            get_working_copy_watcher_status,
+            start_working_copy_watcher,
+            stop_working_copy_watcher
         ])
         .run(tauri::generate_context!())
         .expect("error while running SVN Scope");

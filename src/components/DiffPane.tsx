@@ -6,6 +6,11 @@ import {
   isConflictedChange,
 } from "../changeItemActions";
 import { wrapSearchMatchIndex } from "../diffSearch";
+import {
+  effectiveDiffPalette,
+  monacoThemeForPalette,
+  type DiffPalette,
+} from "../diffPalette";
 import { displayStatusCode } from "../status";
 import type { ChangeEntry, DiffResult } from "../types";
 import { Icon } from "./Icons";
@@ -59,6 +64,17 @@ const createInitialSideSearch = (): SideSearchState => ({
 });
 
 const SEARCH_MATCH_LIMIT = 10_000;
+const DIFF_PALETTE_STORAGE_KEY = "svn-scope.diff-palette";
+
+function initialDiffPalette(): DiffPalette {
+  try {
+    const stored = window.localStorage.getItem(DIFF_PALETTE_STORAGE_KEY);
+    if (stored === "status" || stored === "contrast" || stored === "classic") return stored;
+  } catch {
+    // The editor remains usable if localStorage is unavailable.
+  }
+  return "status";
+}
 
 function applyCollapsedState(editor: MountedDiffEditor, mode: DiffViewMode) {
   const collapsible = editor as CollapsibleDiffEditor;
@@ -145,6 +161,7 @@ export function DiffPane({
   onLoadPropertyDiff,
 }: DiffPaneProps) {
   const [viewMode, setViewMode] = useState<DiffViewMode>("all");
+  const [diffPalette, setDiffPalette] = useState<DiffPalette>(initialDiffPalette);
   const [diffCount, setDiffCount] = useState(0);
   const [editorReady, setEditorReady] = useState(false);
   const [sideSearches, setSideSearches] = useState<Record<DiffSide, SideSearchState>>({
@@ -302,6 +319,14 @@ export function DiffPane({
   }, [viewMode]);
 
   useEffect(() => {
+    try {
+      window.localStorage.setItem(DIFF_PALETTE_STORAGE_KEY, diffPalette);
+    } catch {
+      // Palette selection still applies for the current session.
+    }
+  }, [diffPalette]);
+
+  useEffect(() => {
     setDiffCount(0);
     originalSearchDecorationsRef.current?.clear();
     modifiedSearchDecorationsRef.current?.clear();
@@ -353,6 +378,7 @@ export function DiffPane({
       ? beyondComparePath ?? "使用 Beyond Compare 打开"
       : "未检测到 Beyond Compare 4/5";
   const canSwitchView = Boolean(diff && !diff.isBinary && !diff.isDirectory);
+  const effectivePalette = effectiveDiffPalette(diffPalette, selected);
 
   return (
     <section className="diff-pane">
@@ -373,29 +399,43 @@ export function DiffPane({
         </div>
         <div className="diff-header-actions">
           {canSwitchView && (
-            <div className="diff-display-control">
-              <span>视图</span>
-              <div className="diff-mode-switch" role="group" aria-label="Diff 显示模式">
-                <button
-                  type="button"
-                  className={viewMode === "diff" ? "active" : ""}
-                  aria-pressed={viewMode === "diff"}
-                  title="折叠未修改区域，只显示差异上下文"
-                  onClick={() => setViewMode("diff")}
+            <>
+              <label className="diff-palette-control" title="配色选择会自动保存">
+                <span>配色</span>
+                <select
+                  value={diffPalette}
+                  aria-label="Diff 高亮配色"
+                  onChange={(event) => setDiffPalette(event.target.value as DiffPalette)}
                 >
-                  差异
-                </button>
-                <button
-                  type="button"
-                  className={viewMode === "all" ? "active" : ""}
-                  aria-pressed={viewMode === "all"}
-                  title="显示完整文件"
-                  onClick={() => setViewMode("all")}
-                >
-                  全部
-                </button>
+                  <option value="status">按状态区分</option>
+                  <option value="contrast">蓝橙高对比</option>
+                  <option value="classic">经典红绿</option>
+                </select>
+              </label>
+              <div className="diff-display-control">
+                <span>视图</span>
+                <div className="diff-mode-switch" role="group" aria-label="Diff 显示模式">
+                  <button
+                    type="button"
+                    className={viewMode === "diff" ? "active" : ""}
+                    aria-pressed={viewMode === "diff"}
+                    title="折叠未修改区域，只显示差异上下文"
+                    onClick={() => setViewMode("diff")}
+                  >
+                    差异
+                  </button>
+                  <button
+                    type="button"
+                    className={viewMode === "all" ? "active" : ""}
+                    aria-pressed={viewMode === "all"}
+                    title="显示完整文件"
+                    onClick={() => setViewMode("all")}
+                  >
+                    全部
+                  </button>
+                </div>
               </div>
-            </div>
+            </>
           )}
           <button
             type="button"
@@ -640,7 +680,8 @@ export function DiffPane({
             {canSwitchView && (
               <div
                 className="diff-overview-label"
-                title="Diff 总览：红色表示删除，绿色表示新增；点击或拖动可快速定位"
+                data-palette={effectivePalette}
+                title="Diff 总览：两种颜色分别表示删除和新增；点击或拖动可快速定位"
               >
                 <i className="removed" />
                 <i className="inserted" />
@@ -670,7 +711,7 @@ export function DiffPane({
                 original={diff.original}
                 modified={diff.modified}
                 language={languageForPath(diff.path)}
-                theme="svn-scope-light"
+                theme={monacoThemeForPalette(effectivePalette)}
                 onMount={handleEditorMount}
                 loading={<div className="diff-loading"><span className="spinner" /> 正在加载编辑器…</div>}
                 options={{

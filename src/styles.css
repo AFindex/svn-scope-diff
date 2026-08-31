@@ -357,6 +357,153 @@ button:disabled {
   text-transform: uppercase;
 }
 
+.scope-heading b {
+  display: grid;
+  min-width: 18px;
+  height: 17px;
+  margin-left: auto;
+  padding: 0 5px;
+  place-items: center;
+  color: #59657b;
+  border-radius: 999px;
+  background: #eef1f6;
+  font-size: 9.5px;
+  letter-spacing: 0;
+}
+
+.scope-directory-list {
+  display: flex;
+  max-height: 124px;
+  min-height: 0;
+  flex-direction: column;
+  gap: 3px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-color: #c5cad4 transparent;
+  scrollbar-width: thin;
+}
+
+.scope-directory-item {
+  display: grid;
+  min-width: 0;
+  padding: 5px 6px;
+  grid-template-columns: 14px minmax(0, 1fr) 22px;
+  align-items: center;
+  gap: 6px;
+  color: #737b89;
+  border: 1px solid #e8eaf0;
+  border-radius: 5px;
+  background: #fafbfc;
+}
+
+.scope-directory-item > span {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.scope-directory-item strong,
+.scope-directory-item small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scope-directory-item strong {
+  color: #303641;
+  font-size: 11.5px;
+  font-weight: 650;
+}
+
+.scope-directory-item small {
+  color: #9298a2;
+  font-family: Consolas, monospace;
+  font-size: 9px;
+}
+
+.scope-directory-item > button {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  place-items: center;
+  color: #8a919d;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+}
+
+.scope-directory-item > button:hover:not(:disabled) {
+  color: #c44752;
+  background: #fdecee;
+}
+
+.scope-actions {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.scope-actions > button {
+  display: inline-flex;
+  height: 25px;
+  padding: 0 7px;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+  color: #4f67a7;
+  border: 1px solid #d9e0f3;
+  border-radius: 4px;
+  background: #f6f8fe;
+  font-size: 10px;
+}
+
+.scope-actions > button:hover:not(:disabled) {
+  border-color: #b9c7eb;
+  background: #edf2ff;
+}
+
+.scope-watch-status {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 5px;
+  color: #697587;
+  font-size: 9.5px;
+  white-space: nowrap;
+}
+
+.scope-watch-status i {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 50%;
+  background: #4eaf72;
+  box-shadow: 0 0 0 2px #e5f5eb;
+}
+
+.scope-watch-status.busy i {
+  background: #547bd6;
+  box-shadow: 0 0 0 2px #e6edff;
+  animation: scope-watch-pulse 900ms ease-in-out infinite alternate;
+}
+
+.scope-watch-status.error {
+  color: #bb4a54;
+}
+
+.scope-watch-status.error i {
+  background: #d85a64;
+  box-shadow: 0 0 0 2px #fde7e9;
+}
+
+@keyframes scope-watch-pulse {
+  to { opacity: 0.35; }
+}
+
 .scope-block > strong {
   overflow: hidden;
   color: #242a34;
@@ -1673,6 +1820,8 @@ button:disabled {
   min-height: 0;
   flex-direction: column;
   background: #fcfcfd;
+  container-name: diff-content;
+  container-type: inline-size;
 }
 
 .scan-banner {
@@ -2082,7 +2231,8 @@ button:disabled {
 }
 
 .diff-header-actions,
-.diff-display-control {
+.diff-display-control,
+.diff-palette-control {
   display: flex;
   flex: 0 0 auto;
   align-items: center;
@@ -2097,10 +2247,36 @@ button:disabled {
   gap: 6px;
 }
 
-.diff-display-control > span {
+.diff-display-control > span,
+.diff-palette-control > span {
   color: #858c97;
   font-size: 10.5px;
   font-weight: 600;
+}
+
+.diff-palette-control {
+  gap: 5px;
+}
+
+.diff-palette-control select {
+  height: 26px;
+  padding: 0 23px 0 7px;
+  color: #4f5867;
+  border: 1px solid #d8dce4;
+  border-radius: 5px;
+  outline: 0;
+  background: #fff;
+  font: inherit;
+  font-size: 10.5px;
+}
+
+.diff-palette-control select:hover {
+  border-color: #b9c4dc;
+}
+
+.diff-palette-control select:focus-visible {
+  border-color: #8ea6df;
+  box-shadow: 0 0 0 2px #dfe7fb;
 }
 
 .diff-side-labels {
@@ -2154,6 +2330,16 @@ button:disabled {
 
 .diff-overview-label i.inserted {
   background: #42a866;
+}
+
+.diff-overview-label[data-palette="new"] i.inserted,
+.diff-overview-label[data-palette="contrast"] i.inserted {
+  background: #3568d4;
+}
+
+.diff-overview-label[data-palette="new"] i.removed,
+.diff-overview-label[data-palette="contrast"] i.removed {
+  background: #d57622;
 }
 
 .diff-side-labels span {
@@ -2856,5 +3042,50 @@ button:disabled {
     width: 100%;
     justify-content: flex-end;
     padding-left: 44px;
+  }
+}
+
+@container diff-content (max-width: 540px) {
+  .diff-header {
+    padding: 0 8px;
+  }
+
+  .diff-header-actions {
+    gap: 6px;
+    margin-left: 8px;
+  }
+
+  .diff-display-control > span,
+  .diff-palette-control > span {
+    display: none;
+  }
+
+  .diff-palette-control select {
+    width: 104px;
+    padding-left: 5px;
+  }
+
+  .bc-button {
+    width: 30px;
+    padding: 0;
+    gap: 0;
+    overflow: hidden;
+    color: transparent;
+    font-size: 0;
+  }
+
+  .bc-button svg {
+    flex: none;
+    color: #515866;
+  }
+}
+
+@container diff-content (max-width: 460px) {
+  .diff-palette-control select {
+    width: 88px;
+  }
+
+  .diff-file-identity > svg {
+    display: none;
   }
 }

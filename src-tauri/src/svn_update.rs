@@ -38,7 +38,7 @@ struct UpdateState {
 struct RunningUpdate {
     update_id: u64,
     pid: u32,
-    directory: String,
+    directories: Vec<String>,
     cancel_requested: bool,
     control: Sender<UpdateControl>,
 }
@@ -63,16 +63,27 @@ pub fn status(manager: &SvnUpdateManager) -> Result<SvnUpdateStatus, String> {
 pub fn start(
     app: AppHandle,
     manager: &SvnUpdateManager,
-    directory: &str,
+    directories: &[String],
     wc_root: &str,
 ) -> Result<SvnUpdateStatus, String> {
-    let (scope, declared_root) = path_scope::validate_scope(directory, wc_root)?;
-    if !scope.is_dir() {
-        return Err(format!("当前 Update 目录不存在：{}", scope.display()));
+    if directories.is_empty() {
+        return Err("请至少指定一个 SVN Update 目录。".to_owned());
     }
-    let actual_root = svn::working_copy_root(&scope)?;
-    if path_scope::path_key(&actual_root) != path_scope::path_key(&declared_root) {
-        return Err("当前目录的实际 SVN 工作副本根目录与扫描结果不一致，请先刷新。".to_owned());
+    let mut scopes = Vec::new();
+    for directory in directories {
+        let (scope, declared_root) = path_scope::validate_scope(directory, wc_root)?;
+        if !scope.is_dir() {
+            return Err(format!("当前 Update 目录不存在：{}", scope.display()));
+        }
+        let actual_root = svn::working_copy_root(&scope)?;
+        if path_scope::path_key(&actual_root) != path_scope::path_key(&declared_root) {
+            return Err("当前目录的实际 SVN 工作副本根目录与扫描结果不一致，请先刷新。".to_owned());
+        }
+        if !scopes.iter().any(|existing: &std::path::PathBuf| {
+            path_scope::path_key(existing) == path_scope::path_key(&scope)
+        }) {
+            scopes.push(scope);
+        }
     }
     let executable = svn::executable_path()?;
 
@@ -83,11 +94,12 @@ pub fn start(
     if let Some(running) = &state.running {
         return Err(format!(
             "已有 SVN Update 正在运行：{}（PID {}）",
-            running.directory, running.pid
+            running.directories.join("；"),
+            running.pid
         ));
     }
 
-    let mut command = update_command(&executable, &scope);
+    let mut command = update_command(&executable, &scopes);
     configure_visible_console(&mut command);
     let child = command.spawn().map_err(|error| {
         format!(
@@ -99,12 +111,15 @@ pub fn start(
     state.next_id = state.next_id.wrapping_add(1).max(1);
     let update_id = state.next_id;
     let pid = child.id();
-    let directory = scope.to_string_lossy().into_owned();
+    let directories: Vec<String> = scopes
+        .iter()
+        .map(|scope| scope.to_string_lossy().into_owned())
+        .collect();
     let (control, receiver) = mpsc::channel();
     state.running = Some(RunningUpdate {
         update_id,
         pid,
-        directory: directory.clone(),
+        directories: directories.clone(),
         cancel_requested: false,
         control,
     });
@@ -120,7 +135,7 @@ pub fn start(
             receiver,
             update_id,
             pid,
-            directory,
+            directories,
         );
     });
 
@@ -156,12 +171,12 @@ fn monitor_process(
     receiver: Receiver<UpdateControl>,
     update_id: u64,
     pid: u32,
-    directory: String,
+    directories: Vec<String>,
 ) {
     let (mut cancel_requested, forced, completion) = wait_for_process(child, receiver, pid);
     let state_cancel_requested = clear_running_update(&manager, update_id);
     cancel_requested |= state_cancel_requested;
-    let event = finished_event(update_id, directory, cancel_requested, forced, completion);
+    let event = finished_event(update_id, directories, cancel_requested, forced, completion);
     let _ = app.emit(FINISHED_EVENT, event);
 }
 
@@ -234,14 +249,14 @@ fn status_from_state(state: &UpdateState) -> SvnUpdateStatus {
             running: true,
             update_id: Some(running.update_id),
             pid: Some(running.pid),
-            directory: Some(running.directory.clone()),
+            directories: running.directories.clone(),
             cancel_requested: running.cancel_requested,
         },
         None => SvnUpdateStatus {
             running: false,
             update_id: None,
             pid: None,
-            directory: None,
+            directories: Vec::new(),
             cancel_requested: false,
         },
     }
@@ -249,7 +264,7 @@ fn status_from_state(state: &UpdateState) -> SvnUpdateStatus {
 
 fn finished_event(
     update_id: u64,
-    directory: String,
+    directories: Vec<String>,
     cancel_requested: bool,
     forced: bool,
     completion: ProcessCompletion,
@@ -281,7 +296,7 @@ fn finished_event(
     };
     SvnUpdateFinished {
         update_id,
-        directory,
+        directories,
         outcome: outcome.to_owned(),
         exit_code,
         forced,
@@ -294,13 +309,13 @@ fn configure_visible_console(command: &mut Command) {
     command.creation_flags(CREATE_NEW_CONSOLE | CREATE_NEW_PROCESS_GROUP);
 }
 
-fn update_command(executable: &std::path::Path, scope: &std::path::Path) -> Command {
+fn update_command(executable: &std::path::Path, scopes: &[std::path::PathBuf]) -> Command {
     let mut command = Command::new(executable);
-    command
-        .arg("update")
-        .arg("--")
-        .arg(svn::target_argument(scope))
-        .current_dir(scope);
+    command.arg("update").arg("--");
+    command.args(scopes.iter().map(|scope| svn::target_argument(scope)));
+    if let Some(first_scope) = scopes.first() {
+        command.current_dir(first_scope);
+    }
     command
 }
 
@@ -352,7 +367,7 @@ mod tests {
     fn classifies_success_failure_and_cancelled_outcomes() {
         let success = finished_event(
             1,
-            r"F:\wc\src".to_owned(),
+            vec![r"F:\wc\src".to_owned()],
             false,
             false,
             ProcessCompletion::Exited(ExitStatus::from_raw(0)),
@@ -361,7 +376,7 @@ mod tests {
 
         let failed = finished_event(
             2,
-            r"F:\wc\src".to_owned(),
+            vec![r"F:\wc\src".to_owned()],
             false,
             false,
             ProcessCompletion::Exited(ExitStatus::from_raw(1)),
@@ -370,7 +385,7 @@ mod tests {
 
         let cancelled = finished_event(
             3,
-            r"F:\wc\src".to_owned(),
+            vec![r"F:\wc\src".to_owned()],
             true,
             true,
             ProcessCompletion::Exited(ExitStatus::from_raw(1)),
@@ -476,7 +491,7 @@ mod tests {
         );
 
         let executable = svn::executable_path().unwrap();
-        let output = update_command(&executable, &first_copy.join("src"))
+        let output = update_command(&executable, &[first_copy.join("src")])
             .output()
             .unwrap();
         assert!(

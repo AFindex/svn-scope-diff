@@ -30,13 +30,13 @@ export interface SvnUpdateStatus {
   running: boolean;
   updateId: number | null;
   pid: number | null;
-  directory: string | null;
+  directories: string[];
   cancelRequested: boolean;
 }
 
 export interface SvnUpdateFinished {
   updateId: number;
-  directory: string;
+  directories: string[];
   outcome: "success" | "cancelled" | "failed";
   exitCode: number | null;
   forced: boolean;
@@ -45,10 +45,31 @@ export interface SvnUpdateFinished {
 
 export interface ScanResult {
   directory: string;
+  scopeDirectories: string[];
   wcRoot: string;
   revision: string | null;
   svnVersion: string;
   changes: ChangeEntry[];
+}
+
+export interface ScanPatch {
+  roots: string[];
+  changes: ChangeEntry[];
+}
+
+export interface WorkingCopyWatcherStatus {
+  watcherId: number | null;
+  directories: string[];
+}
+
+export interface WorkingCopyChanged {
+  watcherId: number;
+  paths: string[];
+}
+
+export interface WorkingCopyWatchError {
+  watcherId: number;
+  message: string;
 }
 
 export interface DiffResult {

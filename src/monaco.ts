@@ -44,26 +44,65 @@ interface MonacoEnvironmentHost extends Window {
 
 loader.config({ monaco: monaco as typeof Monaco });
 
-monaco.editor.defineTheme("svn-scope-light", {
-  base: "vs",
-  inherit: true,
-  rules: [],
+function defineDiffTheme(
+  name: string,
   colors: {
+    insertedText: string;
+    removedText: string;
+    insertedLine: string;
+    removedLine: string;
+    insertedOverview: string;
+    removedOverview: string;
+  },
+) {
+  monaco.editor.defineTheme(name, {
+    base: "vs",
+    inherit: true,
+    rules: [],
+    colors: {
     "editor.background": "#FCFCFD",
     "editorGutter.background": "#F8F9FB",
     "editorLineNumber.foreground": "#A8ADB7",
     "editorLineNumber.activeForeground": "#555C68",
-    "diffEditor.insertedTextBackground": "#B9F1C780",
-    "diffEditor.removedTextBackground": "#FFC8C880",
-    "diffEditor.insertedLineBackground": "#E7F8EB",
-    "diffEditor.removedLineBackground": "#FDEBEC",
+    "diffEditor.insertedTextBackground": colors.insertedText,
+    "diffEditor.removedTextBackground": colors.removedText,
+    "diffEditor.insertedLineBackground": colors.insertedLine,
+    "diffEditor.removedLineBackground": colors.removedLine,
     "diffEditor.diagonalFill": "#EFF1F5",
-    "diffEditorOverview.insertedForeground": "#42A866D9",
-    "diffEditorOverview.removedForeground": "#D85A64D9",
+    "diffEditorOverview.insertedForeground": colors.insertedOverview,
+    "diffEditorOverview.removedForeground": colors.removedOverview,
     "editorOverviewRuler.background": "#F6F7FA",
     "editorOverviewRuler.border": "#E4E7EC",
     "scrollbarSlider.background": "#8791A32E",
     "scrollbarSlider.hoverBackground": "#7E899D52",
     "scrollbarSlider.activeBackground": "#6F7C946B",
-  },
+    },
+  });
+}
+
+defineDiffTheme("svn-scope-light", {
+  insertedText: "#B9F1C780",
+  removedText: "#FFC8C880",
+  insertedLine: "#E7F8EB",
+  removedLine: "#FDEBEC",
+  insertedOverview: "#42A866D9",
+  removedOverview: "#D85A64D9",
+});
+
+defineDiffTheme("svn-scope-new-file", {
+  insertedText: "#AFC8FF9C",
+  removedText: "#FFD6A080",
+  insertedLine: "#E6EDFF",
+  removedLine: "#FFF1DF",
+  insertedOverview: "#4D72D8E8",
+  removedOverview: "#D7862FE8",
+});
+
+defineDiffTheme("svn-scope-high-contrast", {
+  insertedText: "#97B8FFB0",
+  removedText: "#FFB876B0",
+  insertedLine: "#DDE8FF",
+  removedLine: "#FFE7CF",
+  insertedOverview: "#285CCBEF",
+  removedOverview: "#D36A16EF",
 });

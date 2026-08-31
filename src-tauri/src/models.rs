@@ -43,7 +43,7 @@ pub struct SvnUpdateStatus {
     pub running: bool,
     pub update_id: Option<u64>,
     pub pid: Option<u32>,
-    pub directory: Option<String>,
+    pub directories: Vec<String>,
     pub cancel_requested: bool,
 }
 
@@ -51,7 +51,7 @@ pub struct SvnUpdateStatus {
 #[serde(rename_all = "camelCase")]
 pub struct SvnUpdateFinished {
     pub update_id: u64,
-    pub directory: String,
+    pub directories: Vec<String>,
     pub outcome: String,
     pub exit_code: Option<i32>,
     pub forced: bool,
@@ -62,10 +62,39 @@ pub struct SvnUpdateFinished {
 #[serde(rename_all = "camelCase")]
 pub struct ScanResult {
     pub directory: String,
+    pub scope_directories: Vec<String>,
     pub wc_root: String,
     pub revision: Option<String>,
     pub svn_version: String,
     pub changes: Vec<ChangeEntry>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanPatch {
+    pub roots: Vec<String>,
+    pub changes: Vec<ChangeEntry>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkingCopyWatcherStatus {
+    pub watcher_id: Option<u64>,
+    pub directories: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkingCopyChanged {
+    pub watcher_id: u64,
+    pub paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkingCopyWatchError {
+    pub watcher_id: u64,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -1,4 +1,4 @@
-use crate::models::{ChangeEntry, DiffResult, FileFingerprint, ScanResult};
+use crate::models::{ChangeEntry, DiffResult, FileFingerprint, ScanPatch, ScanResult};
 use encoding_rs::{GBK, UTF_16BE, UTF_16LE};
 use quick_xml::de::from_str;
 use serde::Deserialize;
@@ -84,33 +84,199 @@ fn default_props() -> String {
     "none".to_owned()
 }
 
+#[cfg(test)]
 pub fn scan(directory: &str) -> Result<ScanResult, String> {
-    let selected = normalize_existing_directory(directory)?;
-    let (wc_root, revision) = working_copy_metadata(&selected)?;
+    scan_scopes(&[directory.to_owned()])
+}
 
-    let output = run_svn([
-        OsString::from("status"),
-        OsString::from("--xml"),
-        OsString::from("--depth"),
-        OsString::from("infinity"),
-        OsString::from("--ignore-externals"),
-        OsString::from("--"),
-        svn_target(&selected),
-    ])?;
-    let xml = String::from_utf8(output.stdout)
-        .map_err(|_| "svn status 返回的 XML 不是有效 UTF-8".to_owned())?;
-    let mut changes = parse_status_xml(&xml, &selected)?;
+pub fn scan_scopes(directories: &[String]) -> Result<ScanResult, String> {
+    if directories.is_empty() {
+        return Err("请至少选择一个 SVN 扫描目录。".to_owned());
+    }
+
+    let mut scopes = Vec::new();
+    let mut wc_root: Option<PathBuf> = None;
+    for directory in directories {
+        let selected = normalize_existing_directory(directory)?;
+        let (selected_root, _) = working_copy_metadata(&selected)?;
+        if let Some(existing_root) = &wc_root {
+            if path_key(existing_root) != path_key(&selected_root) {
+                return Err("多个扫描目录必须位于同一个 SVN 工作副本中。".to_owned());
+            }
+        } else {
+            wc_root = Some(selected_root);
+        }
+        if !scopes
+            .iter()
+            .any(|existing: &PathBuf| path_key(existing) == path_key(&selected))
+        {
+            scopes.push(selected);
+        }
+    }
+
+    scopes.sort_by_key(|path| path.components().count());
+    let mut minimal_scopes: Vec<PathBuf> = Vec::new();
+    for scope in scopes {
+        if minimal_scopes
+            .iter()
+            .any(|existing| path_is_within(&scope, existing))
+        {
+            continue;
+        }
+        minimal_scopes.retain(|existing| !path_is_within(existing, &scope));
+        minimal_scopes.push(scope);
+    }
+    minimal_scopes.sort_by_cached_key(|path| path_string(path).to_lowercase());
+
+    let display_root = common_directory(&minimal_scopes)
+        .ok_or_else(|| "无法确定多个扫描目录的公共路径。".to_owned())?;
+    let wc_root = wc_root.ok_or_else(|| "无法确定 SVN 工作副本根目录。".to_owned())?;
+    let revision = working_copy_metadata(&wc_root)?.1;
+    let mut changes = Vec::new();
+    let mut seen = HashSet::new();
+
+    for scope in &minimal_scopes {
+        let output = run_svn([
+            OsString::from("status"),
+            OsString::from("--xml"),
+            OsString::from("--depth"),
+            OsString::from("infinity"),
+            OsString::from("--ignore-externals"),
+            OsString::from("--"),
+            svn_target(scope),
+        ])?;
+        let xml = String::from_utf8(output.stdout)
+            .map_err(|_| "svn status 返回的 XML 不是有效 UTF-8".to_owned())?;
+        for change in parse_status_target(&xml, scope, &display_root)? {
+            if seen.insert(path_key(Path::new(&change.path))) {
+                changes.push(change);
+            }
+        }
+    }
+
     populate_missing_kinds(&mut changes);
+    expand_unversioned_directories(&mut changes, &display_root);
+    infer_directory_entries(&mut changes);
 
     changes.sort_by_cached_key(|change| change.relative_path.to_lowercase());
 
     let svn_version = svn_version()?;
 
     Ok(ScanResult {
-        directory: path_string(&selected),
+        directory: path_string(&display_root),
+        scope_directories: minimal_scopes
+            .iter()
+            .map(|path| path_string(path))
+            .collect(),
         wc_root: path_string(&wc_root),
         revision,
         svn_version,
+        changes,
+    })
+}
+
+pub fn scan_changed_paths(
+    scope_directories: &[String],
+    paths: &[String],
+    display_root: &str,
+    wc_root: &str,
+) -> Result<ScanPatch, String> {
+    if scope_directories.is_empty() || paths.is_empty() {
+        return Ok(ScanPatch {
+            roots: Vec::new(),
+            changes: Vec::new(),
+        });
+    }
+
+    let display_root = absolute_path(display_root, "变更显示根目录")?;
+    let wc_root = absolute_path(wc_root, "SVN 工作副本根目录")?;
+    if !path_is_within(&display_root, &wc_root) {
+        return Err("变更显示根目录不在 SVN 工作副本中，请执行完整刷新。".to_owned());
+    }
+
+    let mut scopes = Vec::new();
+    for directory in scope_directories {
+        let scope = normalize_existing_directory(directory)?;
+        if !path_is_within(&scope, &display_root) || !path_is_within(&scope, &wc_root) {
+            return Err("扫描范围与当前工作副本不一致，请执行完整刷新。".to_owned());
+        }
+        if !scopes
+            .iter()
+            .any(|existing: &PathBuf| path_key(existing) == path_key(&scope))
+        {
+            scopes.push(scope);
+        }
+    }
+
+    let mut targets = Vec::new();
+    for path in paths {
+        let target = absolute_path(path, "局部刷新路径")?;
+        if !path_is_within(&target, &wc_root)
+            || !scopes.iter().any(|scope| path_is_within(&target, scope))
+        {
+            return Err(format!(
+                "拒绝刷新当前扫描范围之外的路径：{}",
+                target.display()
+            ));
+        }
+        if !targets
+            .iter()
+            .any(|existing: &PathBuf| path_key(existing) == path_key(&target))
+        {
+            targets.push(target);
+        }
+    }
+
+    targets.sort_by_key(|path| path.components().count());
+    let mut minimal_targets: Vec<PathBuf> = Vec::new();
+    for target in targets {
+        if minimal_targets
+            .iter()
+            .any(|existing| path_is_within(&target, existing))
+        {
+            continue;
+        }
+        minimal_targets.retain(|existing| !path_is_within(existing, &target));
+        minimal_targets.push(target);
+    }
+
+    let mut changes = Vec::new();
+    let mut seen = HashSet::new();
+    for target in &minimal_targets {
+        // Editors often save through a short-lived temporary file. Once that file
+        // has disappeared and SVN has no WC record for it, the correct patch is
+        // simply an empty replacement for that path.
+        if !target.exists() && svn_info(target).is_err() {
+            continue;
+        }
+        let output = run_svn([
+            OsString::from("status"),
+            OsString::from("--xml"),
+            OsString::from("--depth"),
+            OsString::from("infinity"),
+            OsString::from("--ignore-externals"),
+            OsString::from("--"),
+            svn_target(target),
+        ])?;
+        let xml = String::from_utf8(output.stdout)
+            .map_err(|_| "svn status 返回的 XML 不是有效 UTF-8".to_owned())?;
+        for change in parse_status_target(&xml, target, &display_root)? {
+            if seen.insert(path_key(Path::new(&change.path))) {
+                changes.push(change);
+            }
+        }
+    }
+
+    populate_missing_kinds(&mut changes);
+    expand_unversioned_directories(&mut changes, &display_root);
+    infer_directory_entries(&mut changes);
+    changes.sort_by_cached_key(|change| change.relative_path.to_lowercase());
+
+    Ok(ScanPatch {
+        roots: minimal_targets
+            .iter()
+            .map(|path| path_string(path))
+            .collect(),
         changes,
     })
 }
@@ -253,7 +419,18 @@ pub fn property_diff(path: &str) -> Result<Option<String>, String> {
     Ok((!value.trim().is_empty()).then_some(value))
 }
 
+#[cfg(test)]
 fn parse_status_xml(xml: &str, selected: &Path) -> Result<Vec<ChangeEntry>, String> {
+    let mut changes = parse_status_target(xml, selected, selected)?;
+    infer_directory_entries(&mut changes);
+    Ok(changes)
+}
+
+fn parse_status_target(
+    xml: &str,
+    selected: &Path,
+    relative_root: &Path,
+) -> Result<Vec<ChangeEntry>, String> {
     let document: StatusDocument =
         from_str(xml).map_err(|error| format!("无法解析 svn status XML：{error}"))?;
     let mut changes = Vec::new();
@@ -279,7 +456,7 @@ fn parse_status_xml(xml: &str, selected: &Path) -> Result<Vec<ChangeEntry>, Stri
             }
 
             let relative = absolute
-                .strip_prefix(selected)
+                .strip_prefix(relative_root)
                 .map(path_string)
                 .unwrap_or_else(|_| path_string(&absolute));
             let relative = if relative.is_empty() {
@@ -306,9 +483,76 @@ fn parse_status_xml(xml: &str, selected: &Path) -> Result<Vec<ChangeEntry>, Stri
         }
     }
 
-    infer_directory_entries(&mut changes);
-
     Ok(changes)
+}
+
+fn expand_unversioned_directories(changes: &mut Vec<ChangeEntry>, relative_root: &Path) {
+    let roots: Vec<PathBuf> = changes
+        .iter()
+        .filter(|change| change.item == "unversioned" && change.is_directory)
+        .map(|change| PathBuf::from(&change.path))
+        .collect();
+    let mut known: HashSet<String> = changes
+        .iter()
+        .map(|change| path_key(Path::new(&change.path)))
+        .collect();
+    let mut discovered = Vec::new();
+
+    for root in roots {
+        let mut pending = vec![root];
+        while let Some(directory) = pending.pop() {
+            let Ok(entries) = fs::read_dir(&directory) else {
+                continue;
+            };
+            let mut entries: Vec<_> = entries.filter_map(Result::ok).collect();
+            entries.sort_by_key(|entry| entry.file_name().to_string_lossy().to_lowercase());
+            for entry in entries {
+                if entry
+                    .file_name()
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case(".svn")
+                {
+                    continue;
+                }
+                let path = entry.path();
+                let Ok(file_type) = entry.file_type() else {
+                    continue;
+                };
+                let is_directory = file_type.is_dir();
+                let key = path_key(&path);
+                if known.insert(key) {
+                    let relative = path
+                        .strip_prefix(relative_root)
+                        .map(path_string)
+                        .unwrap_or_else(|_| path_string(&path))
+                        .replace('\\', "/");
+                    discovered.push(ChangeEntry {
+                        path: path_string(&path),
+                        relative_path: relative,
+                        name: entry.file_name().to_string_lossy().into_owned(),
+                        item: "unversioned".to_owned(),
+                        properties: "none".to_owned(),
+                        status_code: "?".to_owned(),
+                        is_directory,
+                        tree_conflicted: false,
+                        base_revision: None,
+                    });
+                }
+                if is_directory && !file_type.is_symlink() && !path.join(".svn").is_dir() {
+                    pending.push(path);
+                }
+            }
+        }
+    }
+    changes.extend(discovered);
+}
+
+fn common_directory(paths: &[PathBuf]) -> Option<PathBuf> {
+    let mut common = paths.first()?.clone();
+    while !paths.iter().all(|path| path_is_within(path, &common)) {
+        common = common.parent()?.to_path_buf();
+    }
+    Some(common)
 }
 
 fn infer_directory_entries(changes: &mut [ChangeEntry]) {
@@ -367,6 +611,15 @@ fn normalize_existing_directory(directory: &str) -> Result<PathBuf, String> {
         return Err(format!("请选择目录，而不是文件：{}", path.display()));
     }
     std::path::absolute(&path).map_err(|error| format!("无法解析目录 {}：{error}", path.display()))
+}
+
+fn absolute_path(value: &str, label: &str) -> Result<PathBuf, String> {
+    let path = PathBuf::from(value);
+    if !path.is_absolute() {
+        return Err(format!("{label}不是绝对路径：{}", path.display()));
+    }
+    std::path::absolute(&path)
+        .map_err(|error| format!("无法解析{label} {}：{error}", path.display()))
 }
 
 fn working_copy_metadata(selected: &Path) -> Result<(PathBuf, Option<String>), String> {
@@ -558,6 +811,13 @@ fn path_is_within(candidate: &Path, parent: &Path) -> bool {
     }
 }
 
+fn path_key(path: &Path) -> String {
+    path_string(path)
+        .replace('/', "\\")
+        .trim_end_matches(['\\', '/'])
+        .to_lowercase()
+}
+
 fn path_string(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
@@ -718,6 +978,37 @@ mod tests {
     }
 
     #[test]
+    fn expands_files_below_an_unversioned_directory() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("new-folder");
+        let nested = root.join("nested");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(root.join("one.cs"), "class One {}\n").unwrap();
+        fs::write(nested.join("two.meta"), "meta\n").unwrap();
+
+        let mut changes = vec![ChangeEntry {
+            path: path_string(&root),
+            relative_path: "new-folder".to_owned(),
+            name: "new-folder".to_owned(),
+            item: "unversioned".to_owned(),
+            properties: "none".to_owned(),
+            status_code: "?".to_owned(),
+            is_directory: true,
+            tree_conflicted: false,
+            base_revision: None,
+        }];
+
+        expand_unversioned_directories(&mut changes, temporary.path());
+        let paths: HashSet<&str> = changes
+            .iter()
+            .map(|change| change.relative_path.as_str())
+            .collect();
+        assert!(paths.contains("new-folder/one.cs"));
+        assert!(paths.contains("new-folder/nested"));
+        assert!(paths.contains("new-folder/nested/two.meta"));
+    }
+
+    #[test]
     fn real_svn_scan_stays_below_selected_directory() {
         if Command::new("svnadmin")
             .args(["--version", "--quiet"])
@@ -753,19 +1044,23 @@ mod tests {
         );
 
         let selected = working_copy.join("src");
+        let tools = working_copy.join("tools");
         let removed_directory = selected.join("removed-dir");
         let missing_file = selected.join("missing.txt");
         fs::create_dir_all(&selected).unwrap();
+        fs::create_dir_all(&tools).unwrap();
         fs::create_dir_all(&removed_directory).unwrap();
         fs::write(working_copy.join("parent.txt"), "parent base\n").unwrap();
         fs::write(selected.join("child.txt"), "child base\n").unwrap();
+        fs::write(tools.join("tool.txt"), "tool base\n").unwrap();
         fs::write(&missing_file, "missing base\n").unwrap();
         fs::write(removed_directory.join("nested.txt"), "removed base\n").unwrap();
         run_checked(
             Command::new("svn")
                 .arg("add")
                 .arg(working_copy.join("parent.txt"))
-                .arg(&selected),
+                .arg(&selected)
+                .arg(&tools),
         );
         run_checked(
             Command::new("svn")
@@ -776,6 +1071,7 @@ mod tests {
 
         fs::write(working_copy.join("parent.txt"), "parent changed\n").unwrap();
         fs::write(selected.join("child.txt"), "child changed\n").unwrap();
+        fs::write(tools.join("tool.txt"), "tool changed\n").unwrap();
         fs::write(selected.join("new.txt"), "new file\n").unwrap();
         run_checked(
             Command::new("svn")
@@ -830,6 +1126,80 @@ mod tests {
             .find(|change| change.relative_path == "missing.txt")
             .unwrap();
         assert!(!missing.is_directory);
+
+        let multi = scan_scopes(&[
+            selected.to_string_lossy().into_owned(),
+            tools.to_string_lossy().into_owned(),
+        ])
+        .unwrap();
+        let multi_paths: Vec<&str> = multi
+            .changes
+            .iter()
+            .map(|change| change.relative_path.as_str())
+            .collect();
+        assert!(multi_paths.contains(&"src/child.txt"));
+        assert!(multi_paths.contains(&"tools/tool.txt"));
+        assert!(!multi_paths.contains(&"parent.txt"));
+        assert_eq!(multi.scope_directories.len(), 2);
+        assert_eq!(
+            path_key(Path::new(&multi.directory)),
+            path_key(&working_copy)
+        );
+
+        let child_path = selected.join("child.txt");
+        let patch = scan_changed_paths(
+            &[selected.to_string_lossy().into_owned()],
+            &[child_path.to_string_lossy().into_owned()],
+            selected.to_str().unwrap(),
+            working_copy.to_str().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(patch.roots.len(), 1);
+        assert_eq!(patch.changes.len(), 1);
+        assert_eq!(patch.changes[0].relative_path, "child.txt");
+
+        let missing_patch = scan_changed_paths(
+            &[selected.to_string_lossy().into_owned()],
+            &[missing_file.to_string_lossy().into_owned()],
+            selected.to_str().unwrap(),
+            working_copy.to_str().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(missing_patch.changes.len(), 1);
+        assert_eq!(missing_patch.changes[0].item, "missing");
+
+        let vanished_patch = scan_changed_paths(
+            &[selected.to_string_lossy().into_owned()],
+            &[selected
+                .join("vanished-editor-temp.tmp")
+                .to_string_lossy()
+                .into_owned()],
+            selected.to_str().unwrap(),
+            working_copy.to_str().unwrap(),
+        )
+        .unwrap();
+        assert!(vanished_patch.changes.is_empty());
+
+        let outside = scan_changed_paths(
+            &[selected.to_string_lossy().into_owned()],
+            &[working_copy
+                .join("parent.txt")
+                .to_string_lossy()
+                .into_owned()],
+            selected.to_str().unwrap(),
+            working_copy.to_str().unwrap(),
+        );
+        assert!(outside.is_err());
+
+        run_checked(Command::new("svn").arg("revert").arg(&child_path));
+        let clean_patch = scan_changed_paths(
+            &[selected.to_string_lossy().into_owned()],
+            &[child_path.to_string_lossy().into_owned()],
+            selected.to_str().unwrap(),
+            working_copy.to_str().unwrap(),
+        )
+        .unwrap();
+        assert!(clean_patch.changes.is_empty());
     }
 
     fn run_checked(command: &mut Command) {

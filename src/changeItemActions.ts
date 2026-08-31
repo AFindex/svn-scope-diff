@@ -1,6 +1,7 @@
 import type { ChangeEntry } from "./types";
 
 export type ChangeItemAction =
+  | "refresh"
   | "open"
   | "reveal"
   | "copyRelativePath"

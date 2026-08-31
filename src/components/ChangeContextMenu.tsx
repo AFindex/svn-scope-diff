@@ -162,6 +162,22 @@ export function ChangeContextMenu({
 
       <div className="change-context-section">
         <MenuItem
+          icon="refresh"
+          label={change.isDirectory ? "局部刷新此目录" : "刷新此项状态"}
+          hint="仅此范围"
+          disabled={workspaceUpdating}
+          title={workspaceUpdating
+            ? updateBlockedTitle
+            : change.isDirectory
+              ? "只重新扫描此目录及其子目录"
+              : "只重新读取此文件的 SVN 状态"}
+          onSelect={() => choose("refresh")}
+        />
+      </div>
+
+      <div className="change-context-separator" />
+      <div className="change-context-section">
+        <MenuItem
           icon="commit"
           label="单独提交此项…"
           hint="TortoiseSVN"

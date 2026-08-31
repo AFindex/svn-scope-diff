@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [switch]$SkipInstall
+    [switch]$SkipInstall,
+    [switch]$SkipBuild
 )
 
 $ErrorActionPreference = 'Stop'
@@ -8,28 +9,35 @@ Set-StrictMode -Version Latest
 
 $projectRoot = [System.IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 $portableRoot = [System.IO.Path]::GetFullPath((Join-Path $projectRoot 'dist-portable'))
-$portableDirectory = [System.IO.Path]::GetFullPath((Join-Path $portableRoot 'SVN Scope 0.1.15'))
+$tauriConfig = Get-Content -LiteralPath (Join-Path $projectRoot 'src-tauri\tauri.conf.json') -Raw | ConvertFrom-Json
+$version = [string]$tauriConfig.version
+if ([string]::IsNullOrWhiteSpace($version)) {
+    throw 'src-tauri\tauri.conf.json does not contain a version.'
+}
+$portableDirectory = [System.IO.Path]::GetFullPath((Join-Path $portableRoot "SVN Scope $version"))
 $stableDirectory = [System.IO.Path]::GetFullPath((Join-Path $portableRoot 'SVN Scope'))
 $sourceExe = Join-Path $projectRoot 'src-tauri\target\release\svn-scope.exe'
-$archive = Join-Path $portableRoot 'SVN-Scope-0.1.15-win-x64.zip'
+$archive = Join-Path $portableRoot "SVN-Scope-$version-win-x64.zip"
 $npmCommand = (Get-Command 'npm.cmd' -ErrorAction Stop).Source
 
 if (-not $portableRoot.StartsWith($projectRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
     throw "Refusing to write outside the project: $portableRoot"
 }
 
-Push-Location $projectRoot
-try {
-    if (-not $SkipInstall -and -not (Test-Path -LiteralPath (Join-Path $projectRoot 'node_modules'))) {
-        & $npmCommand ci
-        if ($LASTEXITCODE -ne 0) { throw 'npm ci failed.' }
-    }
+if (-not $SkipBuild) {
+    Push-Location $projectRoot
+    try {
+        if (-not $SkipInstall -and -not (Test-Path -LiteralPath (Join-Path $projectRoot 'node_modules'))) {
+            & $npmCommand ci
+            if ($LASTEXITCODE -ne 0) { throw 'npm ci failed.' }
+        }
 
-    & $npmCommand run tauri -- build --no-bundle
-    if ($LASTEXITCODE -ne 0) { throw 'Tauri release build failed.' }
-}
-finally {
-    Pop-Location
+        & $npmCommand run tauri -- build --no-bundle
+        if ($LASTEXITCODE -ne 0) { throw 'Tauri release build failed.' }
+    }
+    finally {
+        Pop-Location
+    }
 }
 
 if (-not (Test-Path -LiteralPath $sourceExe -PathType Leaf)) {
@@ -49,6 +57,14 @@ Copy-Item -LiteralPath $sourceExe -Destination (Join-Path $portableDirectory 'SV
 
 Get-ChildItem -LiteralPath (Join-Path $projectRoot 'portable') -File | ForEach-Object {
     Copy-Item -LiteralPath $_.FullName -Destination $portableDirectory
+}
+$portableReadme = Get-ChildItem -LiteralPath $portableDirectory -File |
+    Where-Object { $_.Name -like 'README-*.txt' } |
+    Select-Object -First 1
+if ($null -ne $portableReadme) {
+    $utf8 = New-Object System.Text.UTF8Encoding($false)
+    $readmeContent = [System.IO.File]::ReadAllText($portableReadme.FullName, $utf8).Replace('{{VERSION}}', $version)
+    [System.IO.File]::WriteAllText($portableReadme.FullName, $readmeContent, $utf8)
 }
 
 $portableExe = Join-Path $portableDirectory 'SVN Scope.exe'
