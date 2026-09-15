@@ -1,11 +1,12 @@
-use crate::models::{CommitLaunchResult, TortoiseSvnAvailability};
+use crate::models::{CommitLaunchResult, TortoiseOperationFinished, TortoiseSvnAvailability};
 use crate::path_scope::{path_key, validate_scope, validate_target};
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tauri::Emitter;
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -29,6 +30,7 @@ pub fn availability() -> TortoiseSvnAvailability {
 }
 
 pub fn open_commit(
+    app: tauri::AppHandle,
     paths: Vec<String>,
     directory: &str,
     wc_root: &str,
@@ -75,10 +77,11 @@ pub fn open_commit(
     append_pathfile_argument(&mut command, &request_path);
     command.arg("/deletepathfile");
 
-    if let Err(error) = command.spawn() {
+    let child = command.spawn().map_err(|error| {
         let _ = fs::remove_file(&request_path);
-        return Err(format!("无法启动 {}：{error}", executable.display()));
-    }
+        format!("无法启动 {}：{error}", executable.display())
+    })?;
+    let operation_id = monitor_operation(app, child, "commit", &targets);
 
     let message = if detected.auto_select_files {
         format!(
@@ -94,6 +97,7 @@ pub fn open_commit(
 
     Ok(CommitLaunchResult {
         selected_count: targets.len(),
+        operation_id,
         message,
     })
 }
@@ -119,6 +123,7 @@ fn action_spec(action: &str) -> Option<ActionSpec> {
 }
 
 pub fn open_action(
+    app: tauri::AppHandle,
     action: &str,
     path: &str,
     directory: &str,
@@ -135,15 +140,103 @@ pub fn open_action(
     let mut command = Command::new(&executable);
     command.arg(format!("/command:{}", spec.command));
     append_path_argument(&mut command, &target);
-    command
+    let child = command
         .spawn()
         .map_err(|error| format!("无法启动 {}：{error}", executable.display()))?;
+    if matches!(action, "revert" | "resolve") {
+        monitor_operation(app, child, action, std::slice::from_ref(&target));
+    }
 
     Ok(format!(
         "已为 {} 打开 TortoiseSVN {}。",
         target.display(),
         spec.opened_label
     ))
+}
+
+pub fn open_batch_action(
+    app: tauri::AppHandle,
+    action: &str,
+    paths: Vec<String>,
+    directory: &str,
+    wc_root: &str,
+) -> Result<String, String> {
+    if !matches!(action, "revert" | "resolve") {
+        return Err(format!("不支持批量 TortoiseSVN 操作：{action}"));
+    }
+    if paths.is_empty() {
+        return Err("没有可执行批量操作的目标。".to_owned());
+    }
+    if paths.len() > MAX_COMMIT_TARGETS {
+        return Err(format!(
+            "一次最多转交 {MAX_COMMIT_TARGETS} 个目标；当前选择了 {} 个。",
+            paths.len()
+        ));
+    }
+
+    let spec = action_spec(action).ok_or_else(|| format!("不支持的 TortoiseSVN 操作：{action}"))?;
+    let (scope, working_copy_root) = validate_scope(directory, wc_root)?;
+    let mut seen = HashSet::new();
+    let mut targets = Vec::with_capacity(paths.len());
+    for raw_path in paths {
+        let target = validate_target(&raw_path, &scope, &working_copy_root, "批量操作目标")?;
+        if seen.insert(path_key(&target)) {
+            targets.push(target);
+        }
+    }
+
+    let executable = locate().ok_or_else(|| {
+        "未找到 TortoiseProc.exe。请安装 TortoiseSVN，或设置 SVN_SCOPE_TORTOISEPROC_EXE 后重启应用。"
+            .to_owned()
+    })?;
+    let request_directory = request_directory()?;
+    cleanup_old_requests(&request_directory);
+    let request_path = request_directory.join(request_file_name());
+    fs::write(&request_path, encode_path_file(&targets))
+        .map_err(|error| format!("无法创建 TortoiseSVN 批量路径文件：{error}"))?;
+
+    let mut command = Command::new(&executable);
+    command.arg(format!("/command:{}", spec.command));
+    append_pathfile_argument(&mut command, &request_path);
+    command.arg("/deletepathfile");
+    let child = command.spawn().map_err(|error| {
+        let _ = fs::remove_file(&request_path);
+        format!("无法启动 {}：{error}", executable.display())
+    })?;
+    monitor_operation(app, child, action, &targets);
+
+    Ok(format!(
+        "已为 {} 项修改打开 TortoiseSVN {}。",
+        targets.len(),
+        spec.opened_label
+    ))
+}
+
+fn monitor_operation(
+    app: tauri::AppHandle,
+    mut child: Child,
+    action: &str,
+    targets: &[PathBuf],
+) -> u64 {
+    let operation_id = REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let action = action.to_owned();
+    let paths = targets
+        .iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    std::thread::spawn(move || {
+        let exit_code = child.wait().ok().and_then(|status| status.code());
+        let _ = app.emit(
+            "tortoise-operation-finished",
+            TortoiseOperationFinished {
+                operation_id,
+                action,
+                paths,
+                exit_code,
+            },
+        );
+    });
+    operation_id
 }
 
 fn locate() -> Option<PathBuf> {

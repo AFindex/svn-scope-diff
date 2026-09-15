@@ -1,7 +1,5 @@
 import type { ChangeEntry } from "./types";
 
-export type ListFilterMode = "text" | "extension";
-
 export const ALL_FILE_TYPES = "__all__";
 export const DIRECTORY_FILE_TYPE = "__directory__";
 export const NO_EXTENSION_FILE_TYPE = "__no_extension__";
@@ -58,21 +56,21 @@ export function fileTypeOptions(changes: ChangeEntry[]) {
 
 export function filterChanges(
   changes: ChangeEntry[],
-  mode: ListFilterMode,
   text: string,
   extensions: readonly string[],
+  includeDirectoryMatches: boolean,
 ) {
-  if (mode === "extension") {
-    if (extensions.includes(ALL_FILE_TYPES)) return [...changes];
-    if (!extensions.length) return [];
-    const selectedExtensions = new Set(extensions);
-    return changes.filter((change) => selectedExtensions.has(extensionOf(change)));
-  }
-
   const terms = text.trim().toLowerCase().split(/\s+/).filter(Boolean);
-  if (!terms.length) return [...changes];
+  const allExtensions = extensions.includes(ALL_FILE_TYPES);
+  if (!allExtensions && !extensions.length) return [];
+  const selectedExtensions = new Set(extensions);
+
   return changes.filter((change) => {
-    const candidate = `${change.name}\n${change.relativePath}`.toLowerCase();
+    if (!allExtensions && !selectedExtensions.has(extensionOf(change))) return false;
+    if (!terms.length) return true;
+    const candidate = includeDirectoryMatches
+      ? `${change.name}\n${change.relativePath}`.toLowerCase()
+      : change.name.toLowerCase();
     return terms.every((term) => candidate.includes(term));
   });
 }

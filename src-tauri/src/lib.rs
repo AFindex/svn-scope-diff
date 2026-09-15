@@ -77,6 +77,31 @@ async fn get_file_fingerprint(path: String) -> Result<FileFingerprint, String> {
 }
 
 #[tauri::command]
+async fn save_working_file_content(
+    path: String,
+    expected_content: String,
+    content: String,
+    fallback_encoding: String,
+    directory: String,
+    scope_directories: Vec<String>,
+    wc_root: String,
+) -> Result<FileFingerprint, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        svn::save_working_file_content(
+            &path,
+            &expected_content,
+            &content,
+            &fallback_encoding,
+            &directory,
+            &scope_directories,
+            &wc_root,
+        )
+    })
+    .await
+    .map_err(|error| format!("局部还原写入任务异常结束：{error}"))?
+}
+
+#[tauri::command]
 async fn get_property_diff(path: String) -> Result<Option<String>, String> {
     tauri::async_runtime::spawn_blocking(move || svn::property_diff(&path))
         .await
@@ -92,12 +117,13 @@ async fn open_in_beyond_compare(path: String, item: String) -> Result<String, St
 
 #[tauri::command]
 async fn open_tortoise_svn_commit(
+    app: tauri::AppHandle,
     paths: Vec<String>,
     directory: String,
     wc_root: String,
 ) -> Result<CommitLaunchResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        tortoise_svn::open_commit(paths, &directory, &wc_root)
+        tortoise_svn::open_commit(app, paths, &directory, &wc_root)
     })
     .await
     .map_err(|error| format!("TortoiseSVN 启动任务异常结束：{error}"))?
@@ -105,16 +131,32 @@ async fn open_tortoise_svn_commit(
 
 #[tauri::command]
 async fn open_tortoise_svn_action(
+    app: tauri::AppHandle,
     action: String,
     path: String,
     directory: String,
     wc_root: String,
 ) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        tortoise_svn::open_action(&action, &path, &directory, &wc_root)
+        tortoise_svn::open_action(app, &action, &path, &directory, &wc_root)
     })
     .await
     .map_err(|error| format!("TortoiseSVN 启动任务异常结束：{error}"))?
+}
+
+#[tauri::command]
+async fn open_tortoise_svn_batch_action(
+    app: tauri::AppHandle,
+    action: String,
+    paths: Vec<String>,
+    directory: String,
+    wc_root: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        tortoise_svn::open_batch_action(app, &action, paths, &directory, &wc_root)
+    })
+    .await
+    .map_err(|error| format!("TortoiseSVN 批量启动任务异常结束：{error}"))?
 }
 
 #[tauri::command]
@@ -210,10 +252,12 @@ pub fn run() {
             get_tortoise_svn_availability,
             get_file_diff,
             get_file_fingerprint,
+            save_working_file_content,
             get_property_diff,
             open_in_beyond_compare,
             open_tortoise_svn_commit,
             open_tortoise_svn_action,
+            open_tortoise_svn_batch_action,
             open_change_path,
             get_svn_update_status,
             start_svn_update,

@@ -24,7 +24,15 @@ export interface TortoiseSvnAvailability extends ToolAvailability {
 
 export interface CommitLaunchResult {
   selectedCount: number;
+  operationId: number;
   message: string;
+}
+
+export interface TortoiseOperationFinished {
+  operationId: number;
+  action: "commit" | "revert" | "resolve";
+  paths: string[];
+  exitCode: number | null;
 }
 
 export interface SvnUpdateStatus {

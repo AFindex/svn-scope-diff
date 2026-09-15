@@ -56,14 +56,27 @@ test("builds deterministic type options with counts", () => {
   ]);
 });
 
-test("filters by multiple text terms or multiple extensions", () => {
+test("combines multiple text terms with multiple extensions", () => {
   const changes = [
     change("src\\VehicleController.cs"),
     change("tests\\VehicleTests.py"),
     change("README"),
   ];
-  assert.deepEqual(filterChanges(changes, "text", "src vehicle", [ALL_FILE_TYPES]), [changes[0]]);
-  assert.deepEqual(filterChanges(changes, "extension", "", ["cs", "py"]), changes.slice(0, 2));
-  assert.deepEqual(filterChanges(changes, "extension", "", []), []);
-  assert.deepEqual(filterChanges(changes, "extension", "", [ALL_FILE_TYPES]), changes);
+  assert.deepEqual(filterChanges(changes, "vehicle", ["cs"], false), [changes[0]]);
+  assert.deepEqual(filterChanges(changes, "vehicle", ["cs", "py"], false), changes.slice(0, 2));
+  assert.deepEqual(filterChanges(changes, "", [], false), []);
+  assert.deepEqual(filterChanges(changes, "", [ALL_FILE_TYPES], false), changes);
+});
+
+test("directory-path matches are opt-in", () => {
+  const changes = [
+    change("generated\\Alpha.cs"),
+    change("src\\generated-result.cs"),
+    change("src\\Beta.cs"),
+  ];
+  assert.deepEqual(filterChanges(changes, "generated", [ALL_FILE_TYPES], false), [changes[1]]);
+  assert.deepEqual(
+    filterChanges(changes, "generated", [ALL_FILE_TYPES], true),
+    changes.slice(0, 2),
+  );
 });

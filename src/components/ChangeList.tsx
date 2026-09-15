@@ -1,4 +1,5 @@
 import { useMemo } from "react";
+import { actionPathKey, type ActionSelectionModifiers } from "../actionSelection";
 import { directoryOf, extensionLabel, extensionOf } from "../changeFilters";
 import { conflictLabel, isConflictedChange } from "../changeItemActions";
 import { commitPathKey, isCommitSelectable } from "../commitSelection";
@@ -15,10 +16,15 @@ interface ChangeListProps {
   totalCount: number;
   emptyMessage: string;
   selectedPath?: string;
+  selectedActionPaths: ReadonlySet<string>;
   selectedCommitPaths: ReadonlySet<string>;
   sortKey: ChangeListSortKey;
   direction: SortDirection;
-  onSelect: (change: ChangeEntry) => void;
+  onSelect: (
+    change: ChangeEntry,
+    modifiers: ActionSelectionModifiers,
+    orderedChanges: ChangeEntry[],
+  ) => void;
   onToggleCommitSelection: (changes: ChangeEntry[], checked: boolean) => void;
   onOpenContextMenu: (
     change: ChangeEntry,
@@ -45,6 +51,7 @@ export function ChangeList({
   totalCount,
   emptyMessage,
   selectedPath,
+  selectedActionPaths,
   selectedCommitPaths,
   sortKey,
   direction,
@@ -83,16 +90,17 @@ export function ChangeList({
         const extension = extensionLabel(extensionOf(change));
         const commitSelectable = isCommitSelectable(change);
         const commitSelected = selectedCommitPaths.has(commitPathKey(change.path));
+        const actionSelected = selectedActionPaths.has(actionPathKey(change.path));
         const conflicted = isConflictedChange(change);
         return (
           <div
             key={change.path}
             role="listitem"
-            className={`change-list-row ${change.path === selectedPath ? "selected" : ""} ${commitSelected ? "commit-selected" : ""} ${conflicted ? "conflicted" : ""}`}
+            className={`change-list-row ${change.path === selectedPath ? "selected" : ""} ${actionSelected ? "action-selected" : ""} ${commitSelected ? "commit-selected" : ""} ${conflicted ? "conflicted" : ""}`}
+            aria-selected={actionSelected}
             title={`${change.relativePath} · ${change.item}`}
             onContextMenu={(event) => {
               event.preventDefault();
-              onSelect(change);
               const bounds = event.currentTarget.getBoundingClientRect();
               onOpenContextMenu(
                 change,
@@ -114,7 +122,14 @@ export function ChangeList({
             <button
               type="button"
               className="change-list-open"
-              onClick={() => onSelect(change)}
+              onClick={(event) => onSelect(
+                change,
+                {
+                  toggle: event.ctrlKey || event.metaKey,
+                  range: event.shiftKey,
+                },
+                rows,
+              )}
             >
               <span className="status-badge" data-status={change.statusCode}>
                 {displayStatusCode(change.statusCode)}

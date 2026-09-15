@@ -1,9 +1,15 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  actionPathKey,
+  reconcileActionSelection,
+  selectedActionChanges,
+  updateActionSelection,
+  type ActionSelectionModifiers,
+} from "../actionSelection";
+import {
   ALL_FILE_TYPES,
   fileTypeOptions,
   filterChanges,
-  type ListFilterMode,
 } from "../changeFilters";
 import {
   commitPathKey,
@@ -38,7 +44,11 @@ interface ChangesPanelProps {
   onClearCommitSelection: () => void;
   onCommitSelection: () => void;
   onUpdateAllTextDiffs: () => void;
-  onItemAction: (action: ChangeItemAction, change: ChangeEntry) => void;
+  onItemAction: (
+    action: ChangeItemAction,
+    change: ChangeEntry,
+    targets: ChangeEntry[],
+  ) => void;
 }
 
 function statusCounts(changes: ChangeEntry[]) {
@@ -93,31 +103,30 @@ export function ChangesPanel({
   onUpdateAllTextDiffs,
   onItemAction,
 }: ChangesPanelProps) {
-  const [treeQuery, setTreeQuery] = useState("");
   const [changeView, setChangeView] = useState<"tree" | "list">("tree");
   const [listSortKey, setListSortKey] = useState<ChangeListSortKey>("path");
   const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
-  const [listFilterMode, setListFilterMode] = useState<ListFilterMode>("text");
-  const [listTextFilter, setListTextFilter] = useState("");
-  const [listExtensionFilters, setListExtensionFilters] = useState<string[]>([ALL_FILE_TYPES]);
+  const [filterText, setFilterText] = useState("");
+  const [extensionFilters, setExtensionFilters] = useState<string[]>([ALL_FILE_TYPES]);
+  const [includeDirectoryMatches, setIncludeDirectoryMatches] = useState(false);
+  const [actionSelectionPaths, setActionSelectionPaths] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [actionSelectionAnchor, setActionSelectionAnchor] = useState<string>();
   const [contextMenu, setContextMenu] = useState<{
     change: ChangeEntry;
+    targets: ChangeEntry[];
     x: number;
     y: number;
     returnFocus?: HTMLElement;
   }>();
   const counts = useMemo(() => statusCounts(changes), [changes]);
   const typeOptions = useMemo(() => fileTypeOptions(changes), [changes]);
-  const filteredListChanges = useMemo(
-    () => filterChanges(changes, listFilterMode, listTextFilter, listExtensionFilters),
-    [changes, listExtensionFilters, listFilterMode, listTextFilter],
+  const filteredChanges = useMemo(
+    () => filterChanges(changes, filterText, extensionFilters, includeDirectoryMatches),
+    [changes, extensionFilters, filterText, includeDirectoryMatches],
   );
-  const filteredTreeChanges = useMemo(() => {
-    const normalized = treeQuery.trim().toLocaleLowerCase();
-    if (!normalized) return changes;
-    return changes.filter((change) => change.relativePath.toLocaleLowerCase().includes(normalized));
-  }, [changes, treeQuery]);
-  const visibleChanges = changeView === "tree" ? filteredTreeChanges : filteredListChanges;
+  const visibleChanges = filteredChanges;
   const visibleCommitChanges = useMemo(
     () => visibleChanges.filter(isCommitSelectable),
     [visibleChanges],
@@ -125,6 +134,10 @@ export function ChangesPanel({
   const commitChanges = useMemo(
     () => selectedCommitChanges(changes, selectedCommitPaths),
     [changes, selectedCommitPaths],
+  );
+  const actionChanges = useMemo(
+    () => selectedActionChanges(filteredChanges, actionSelectionPaths),
+    [actionSelectionPaths, filteredChanges],
   );
   const allVisibleSelected = Boolean(visibleCommitChanges.length) && visibleCommitChanges.every(
     (change) => selectedCommitPaths.has(commitPathKey(change.path)),
@@ -143,12 +156,24 @@ export function ChangesPanel({
 
   useEffect(() => {
     const availableValues = new Set(typeOptions.map((option) => option.value));
-    setListExtensionFilters((current) => {
+    setExtensionFilters((current) => {
       if (current.includes(ALL_FILE_TYPES)) return current;
       const availableSelection = current.filter((value) => availableValues.has(value));
       return availableSelection.length === current.length ? current : availableSelection;
     });
   }, [typeOptions]);
+
+  useEffect(() => {
+    setActionSelectionPaths((current) => reconcileActionSelection(current, filteredChanges));
+    if (
+      actionSelectionAnchor
+      && !filteredChanges.some(
+        (change) => actionPathKey(change.path) === actionPathKey(actionSelectionAnchor),
+      )
+    ) {
+      setActionSelectionAnchor(undefined);
+    }
+  }, [actionSelectionAnchor, filteredChanges]);
 
   useEffect(() => {
     if (
@@ -166,8 +191,36 @@ export function ChangesPanel({
     y: number,
     returnFocus?: HTMLElement,
   ) => {
-    setContextMenu({ change, x, y, returnFocus });
-  }, []);
+    let targets = [change];
+    if (!change.contextOnly) {
+      const clickedKey = actionPathKey(change.path);
+      if (actionSelectionPaths.has(clickedKey)) {
+        targets = selectedActionChanges(filteredChanges, actionSelectionPaths);
+      } else {
+        setActionSelectionPaths(new Set([clickedKey]));
+        setActionSelectionAnchor(change.path);
+      }
+      onSelect(change);
+    }
+    setContextMenu({ change, targets, x, y, returnFocus });
+  }, [actionSelectionPaths, filteredChanges, onSelect]);
+
+  const selectChange = useCallback((
+    change: ChangeEntry,
+    modifiers: ActionSelectionModifiers,
+    orderedChanges: ChangeEntry[],
+  ) => {
+    const result = updateActionSelection(
+      actionSelectionPaths,
+      change,
+      orderedChanges,
+      actionSelectionAnchor,
+      modifiers,
+    );
+    setActionSelectionPaths(result.selectedPaths);
+    setActionSelectionAnchor(result.anchorPath);
+    onSelect(change);
+  }, [actionSelectionAnchor, actionSelectionPaths, onSelect]);
   const closeContextMenu = useCallback((restoreFocus = false) => {
     setContextMenu((current) => {
       if (restoreFocus && current?.returnFocus) {
@@ -177,13 +230,11 @@ export function ChangesPanel({
     });
   }, []);
 
-  const listEmptyMessage = listFilterMode === "text"
-    ? listTextFilter.trim()
-      ? `没有匹配“${listTextFilter.trim()}”的变更`
-      : "没有可显示的变更"
-    : listExtensionFilters.length
-      ? "没有匹配所选后缀的变更"
-      : "请至少选择一种文件后缀";
+  const filterEmptyMessage = !extensionFilters.length
+    ? "请至少选择一种文件后缀"
+    : filterText.trim()
+      ? `没有匹配“${filterText.trim()}”和所选后缀的变更`
+      : "没有匹配所选后缀的变更";
 
   return (
     <div className="changes-panel">
@@ -257,62 +308,65 @@ export function ChangesPanel({
         </div>
       </div>
 
-      {changeView === "tree" ? (
-        <SearchField
-          value={treeQuery}
-          ariaLabel="按文件名或路径筛选层级视图"
-          placeholder="筛选文件名或路径"
-          className="tree-filter-box"
-          onChange={setTreeQuery}
-        />
-      ) : (
-        <div className="list-filter-panel">
-          <div className="list-filter-heading">
-            <span className="list-filter-title">
-              <Icon name="filter" size={14} />
-              筛选
-            </span>
-            <div className="list-filter-mode" role="group" aria-label="列表筛选方式">
-              <button
-                type="button"
-                className={listFilterMode === "text" ? "active" : ""}
-                aria-pressed={listFilterMode === "text"}
-                onClick={() => setListFilterMode("text")}
-              >
-                文本
-              </button>
-              <button
-                type="button"
-                className={listFilterMode === "extension" ? "active" : ""}
-                aria-pressed={listFilterMode === "extension"}
-                onClick={() => setListFilterMode("extension")}
-              >
-                后缀
-              </button>
-            </div>
-            <span className="list-filter-count" title="筛选结果 / 全部修改">
-              {filteredListChanges.length}/{changes.length}
-            </span>
-          </div>
-
-          {listFilterMode === "text" ? (
-            <SearchField
-              value={listTextFilter}
-              ariaLabel="按文件名或相对路径筛选列表"
-              placeholder="输入文件名或相对路径，可用空格分词"
-              className="list-filter-input"
-              onChange={setListTextFilter}
+      <div className="list-filter-panel combined-filter-panel">
+        <div className="list-filter-heading">
+          <span className="list-filter-title">
+            <Icon name="filter" size={14} />
+            组合筛选
+          </span>
+          <label
+            className="directory-match-toggle"
+            title="开启后，搜索目录名也会显示该目录下的匹配项；默认只匹配文件名"
+          >
+            <input
+              type="checkbox"
+              checked={includeDirectoryMatches}
+              onChange={(event) => setIncludeDirectoryMatches(event.target.checked)}
             />
-          ) : (
-            <ExtensionFilterSelect
-              options={typeOptions}
-              selectedValues={listExtensionFilters}
-              totalCount={changes.length}
-              onChange={setListExtensionFilters}
-            />
-          )}
+            <span aria-hidden="true" />
+            目录路径
+          </label>
+          <span className="list-filter-count" title="筛选结果 / 全部修改">
+            {filteredChanges.length}/{changes.length}
+          </span>
         </div>
-      )}
+
+        <div className="combined-filter-fields">
+          <SearchField
+            value={filterText}
+            ariaLabel="按文件名筛选修改"
+            placeholder={includeDirectoryMatches
+              ? "文件名或相对路径（空格分词）"
+              : "文件名（空格分词）"}
+            className="list-filter-input"
+            onChange={setFilterText}
+          />
+          <ExtensionFilterSelect
+            options={typeOptions}
+            selectedValues={extensionFilters}
+            totalCount={changes.length}
+            onChange={setExtensionFilters}
+          />
+        </div>
+      </div>
+
+      <div className={`action-selection-panel ${actionChanges.length ? "has-selection" : ""}`}>
+        <span>
+          <Icon name="check" size={13} />
+          操作选择 <b>{actionChanges.length}</b>
+        </span>
+        <small>Ctrl 多选 · Shift 连选 · 右键批量操作</small>
+        <button
+          type="button"
+          disabled={!actionChanges.length}
+          onClick={() => {
+            setActionSelectionPaths(new Set());
+            setActionSelectionAnchor(undefined);
+          }}
+        >
+          清除
+        </button>
+      </div>
 
       <div className="commit-selection-panel">
         <div className="commit-selection-summary">
@@ -408,28 +462,31 @@ export function ChangesPanel({
 
       <div className="changes-scroll">
         {changes.length ? (
-          changeView === "tree" ? (
+          !filteredChanges.length ? (
+            <div className="tree-no-results">{filterEmptyMessage}</div>
+          ) : changeView === "tree" ? (
             <ChangeTree
               scopeDirectory={directory}
               scopeDirectories={scopeDirectories}
-              changes={changes}
+              changes={filteredChanges}
               selectedPath={selectedPath}
+              selectedActionPaths={actionSelectionPaths}
               selectedCommitPaths={selectedCommitPaths}
-              query={treeQuery}
-              onSelect={onSelect}
+              onSelect={selectChange}
               onToggleCommitSelection={onToggleCommitSelection}
               onOpenContextMenu={openContextMenu}
             />
           ) : (
             <ChangeList
-              changes={filteredListChanges}
+              changes={filteredChanges}
               totalCount={changes.length}
-              emptyMessage={listEmptyMessage}
+              emptyMessage={filterEmptyMessage}
               selectedPath={selectedPath}
+              selectedActionPaths={actionSelectionPaths}
               selectedCommitPaths={selectedCommitPaths}
               sortKey={listSortKey}
               direction={sortDirection}
-              onSelect={onSelect}
+              onSelect={selectChange}
               onToggleCommitSelection={onToggleCommitSelection}
               onOpenContextMenu={openContextMenu}
             />
@@ -445,6 +502,7 @@ export function ChangesPanel({
       {contextMenu && (
         <ChangeContextMenu
           change={contextMenu.change}
+          targets={contextMenu.targets}
           x={contextMenu.x}
           y={contextMenu.y}
           tortoiseAvailable={tortoiseSvn?.available ?? false}

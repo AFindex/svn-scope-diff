@@ -9,11 +9,11 @@
 - 支持选择一个或多个同工作副本内的小目录作为扫描范围；分别执行 `svn status --xml --depth infinity <目录>` 后合并结果，不会为了展示公共层级而扫描父目录。扫描范围可以随时添加或移除。
 - SVN 只返回一个未版本化目录时，会在本地展开其内部文件和子目录，因此整棵新增目录不再只显示一个空的 `U` 项；`.svn` 管理目录和独立嵌套工作副本不会被递归进入。
 - 文件树展示 `M / A / D / R / C / ! / U / ~`，其中 `U` 表示未版本化；内部仍保留 SVN 原始状态码 `?`。
-- 左侧可在“层级 / 列表”间切换；列表支持按相对路径、文件名、所在目录、修改状态、扩展名排序，并可切换升降序。筛选区可在“文本 / 后缀”间切换：文本支持文件名与相对路径空格分词，后缀使用多选下拉，选项按当前修改动态生成并显示数量，包含目录与无后缀类型；下拉内可一键“全选”或“清除选择”。
-- 列表和层级模式都有独立的提交复选框；选择热区为 28×28，层级目录使用全选/半选/未选三态。待提交选择采用浅色描边与蓝色文件名，当前 Diff 文件则使用更强的左侧蓝条，二者不会混淆。选择状态跨显示模式、排序和筛选保留，并支持“全选当前筛选”“取消当前”和“清空”。
+- 左侧可在“层级 / 列表”间切换；列表支持按相对路径、文件名、所在目录、修改状态、扩展名排序，并可切换升降序。文本与多选后缀现在是组合筛选条件，选项按当前修改动态生成并显示数量，包含目录与无后缀类型；下拉内可一键“全选”或“清除选择”。默认只按文件名匹配，按需开启“目录路径”后才让父目录命中带出子项，避免搜索结果混入整片无关目录。
+- 列表和层级模式都有两套明确分离的选择：复选框只控制提交选择；点击行控制右键批量操作选择，Ctrl 可增减单项，Shift 可连续选择，Ctrl+Shift 可把连续范围并入已有选择。批量选择、当前 Diff 文件和提交勾选使用不同强度的高亮，并提供操作选择计数与清除按钮。
 - 左侧修改区和右侧 Diff 之间有可拖动分隔条；宽度限制会为 Diff 保留可用空间，支持方向键微调、Shift 加速、Home/End 边界、双击复位，并在本机记住上次宽度。拖动过程直接更新网格宽度，避免让 Monaco 高频重渲染。
 - 左侧“用 TortoiseSVN 提交”把勾选项作为具体路径转交给小乌龟 Commit 窗口；大量路径使用 UTF-16LE、无 BOM、LF 分隔的临时 `/pathfile`，完成后由 `/deletepathfile` 清理。未版本化目录不会直接转交，避免意外递归加入未知文件。
-- 层级和列表中的每个 item 都提供统一右键菜单：局部刷新、单独提交、Revert、Blame、Show Log、复制相对/完整路径、系统默认打开、在资源管理器中定位，以及冲突项专用的冲突编辑器和“标记为已解决”。顶部扫描范围目录和层级分组目录也有精简的目录菜单，只保留局部刷新、Show Log、打开、定位、复制路径等适用操作；多扫描范围时还能从菜单移除该范围。局部刷新只重查该文件，或该目录及子目录；Revert 与 Resolve 只打开 TortoiseSVN 的确认窗口，不会静默执行。
+- 层级和列表中的每个 item 都提供统一右键菜单：局部刷新、提交、Revert、Blame、Show Log、复制相对/完整路径、系统默认打开、在资源管理器中定位，以及冲突项专用的冲突编辑器和“标记为已解决”。操作选择包含多项时，刷新、提交、Revert、Resolve 和复制路径会自动切换为批量操作；不适用于批量的打开、Blame 与 Show Log 会隐藏。顶部扫描范围目录和层级分组目录也有精简的目录菜单。Revert 与 Resolve 只打开 TortoiseSVN 的确认窗口，不会静默执行。
 - 文本、属性和树冲突使用独立红色行标与类型标签；层级目录会汇总后代冲突数。右侧 Diff 同步显示冲突警示、工作副本冲突标签和检测到的文本冲突块，并可直接打开三方冲突编辑器。
 - 顶部“刷新变更”（Ctrl+R）重新扫描全部当前范围；保留仍有效的当前 Diff 文件和提交选择，已恢复干净或消失的条目会从选择中移除。
 - 默认开启工作副本文件事件监听；保存、创建、删除或重命名文件后，450ms 内的事件会先合并，再只对受影响路径执行 SVN 状态查询并补丁式更新左侧列表。当前正在查看的文件仍按原规则弹窗询问是否重载 Diff，不会被静默替换。
@@ -22,6 +22,7 @@
 - diff 顶部右侧可直接在“差异 / 全部”间切换：“差异”折叠长段未修改内容，“全部”显示完整文件。
 - Diff 配色可在“按状态区分 / 蓝橙高对比 / 经典红绿”间切换并自动记忆。默认按状态区分时，新增与未版本化文件使用蓝紫色整文件高亮，普通修改仍使用红/绿双向对照。
 - Diff 工具栏显示差异块总数，并可循环跳转到上一个/下一个差异；BASE 与工作副本各有独立的常驻搜索栏、命中数及上/下一个结果导航，两个搜索框可以同时保持打开。在“差异”模式中命中折叠行会自动展开并定位；窄窗口仍保持双栏。
+- 在 BASE 或工作副本侧选中一处或跨多处差异后，可直接“还原选中差异”。写入前会再次确认，并校验磁盘内容仍与当前 Diff 一致；UTF-8/BOM、UTF-16 与有效 GBK 会按原编码写回，大文件、二进制或已在外部更新的文件会拒绝覆盖。
 - 左侧变更区和右侧 diff 各自独立滚动；右侧启用 Monaco Diff Overview Ruler，以当前配色标记整份文件中的删除与新增，当前视口可点击或拖动定位；普通滚动条保持独立细尺寸。
 - 扫描合并 SVN 元数据查询并缓存工具探测；文本 diff 复用扫描得到的文件类型与 BASE revision，属性差异仅在展开时读取。
 - 普通浏览时最近 12 个文本 diff 使用内存 LRU 缓存；切回文件时只校验大小与纳秒级修改时间，未更新就不再读取工作文件或调用 `svn cat`。
@@ -50,9 +51,9 @@ Beyond Compare 提供的是独立桌面应用和命令行入口，并没有适�
 $env:SVN_SCOPE_TORTOISEPROC_EXE = 'D:\Tools\TortoiseSVN\bin\TortoiseProc.exe'
 ```
 
-提交按钮只负责打开小乌龟的标准 Commit 窗口，不会绕过确认或直接提交。TortoiseSVN 默认开启“Select items automatically”，因此传入的文件会预先勾选；如果用户关闭该设置，SVN Scope 会显示提示但不会擅自修改注册表。真实目录变更可能让 TortoiseSVN 展开目录，界面会提醒在提交窗口中复核；未版本化目录则明确禁止直接转交。
+提交按钮只负责打开小乌龟的标准 Commit 窗口，不会绕过确认或直接提交。TortoiseSVN 默认开启“Select items automatically”，因此传入的文件会预先勾选；如果用户关闭该设置，SVN Scope 会显示提示但不会擅自修改注册表。真实目录变更可能让 TortoiseSVN 展开目录，界面会提醒在提交窗口中复核；未版本化目录则明确禁止直接转交。Commit、Revert 或 Resolve 窗口关闭后，SVN Scope 会自动局部刷新这次转交的路径，使已提交或已还原的条目及时消失。
 
-item 右键菜单通过 TortoiseSVN 官方 `TortoiseProc.exe /command:* /path:*` 接口打开 `revert / blame / log / conflicteditor / resolve` 窗口。所有目标在 Rust 侧再次校验，必须同时位于当前扫描范围和 SVN 工作副本之内。`resolve` 不传 `/noquestion`，因此仍由 TortoiseSVN 做最后确认。
+item 右键菜单通过 TortoiseSVN 官方 `TortoiseProc.exe /command:* /path:*` 接口打开 `revert / blame / log / conflicteditor / resolve` 窗口；批量操作与批量提交一样使用 UTF-16、无 BOM 的 `/pathfile`。所有目标在 Rust 侧再次校验，必须同时位于当前扫描范围和 SVN 工作副本之内。`resolve` 不传 `/noquestion`，因此仍由 TortoiseSVN 做最后确认。
 
 ## 本地开发
 
@@ -104,14 +105,14 @@ npm run portable
 
 ```text
 dist-portable\
-├─ SVN Scope 0.2.0\
+├─ SVN Scope 0.3.0\
 │  ├─ SVN Scope.exe
 │  ├─ Register-ContextMenu.cmd
 │  ├─ Unregister-ContextMenu.cmd
 │  ├─ 对应 PowerShell 脚本
 │  ├─ README-便携版.txt
 │  └─ SHA256SUMS.txt
-└─ SVN-Scope-0.2.0-win-x64.zip
+└─ SVN-Scope-0.3.0-win-x64.zip
 ```
 
 首次构建会下载 npm/crates.io 依赖；之后是纯本机构建。产物不包含安装器、自动更新器、遥测或云服务。
@@ -146,4 +147,5 @@ dist-portable\
 - [Tauri 2 prerequisites](https://v2.tauri.app/start/prerequisites/)
 - [Tauri build / `--no-bundle`](https://v2.tauri.app/distribute/)
 - [Subversion `svn cat`](https://svnbook.red-bean.com/en/1.8/svn.ref.svn.c.cat.html)
+- [TortoiseSVN command-line automation](https://tortoisesvn.net/docs/release/TortoiseSVN_en/tsvn-automation.html)
 - [Beyond Compare command-line reference](https://www.scootersoftware.com/v5help/command_line_reference.html)

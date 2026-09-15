@@ -11,6 +11,11 @@ import {
   monacoThemeForPalette,
   type DiffPalette,
 } from "../diffPalette";
+import {
+  revertSelectedDiffChanges,
+  selectedDiffChanges,
+  type DiffLineSelection,
+} from "../diffRevert";
 import { displayStatusCode } from "../status";
 import type { ChangeEntry, DiffResult } from "../types";
 import { Icon } from "./Icons";
@@ -26,6 +31,9 @@ interface DiffPaneProps {
   tortoiseSvnAvailable: boolean;
   onOpenConflictEditor: () => void;
   onMarkResolved: () => void;
+  workspaceUpdating: boolean;
+  revertingSelectedDiff: boolean;
+  onRevertSelectedDiff: (content: string, hunkCount: number) => void;
   propertyDiff?: string | null;
   propertyDiffLoading: boolean;
   propertyDiffLoaded: boolean;
@@ -154,6 +162,9 @@ export function DiffPane({
   tortoiseSvnAvailable,
   onOpenConflictEditor,
   onMarkResolved,
+  workspaceUpdating,
+  revertingSelectedDiff,
+  onRevertSelectedDiff,
   propertyDiff,
   propertyDiffLoading,
   propertyDiffLoaded,
@@ -163,6 +174,7 @@ export function DiffPane({
   const [viewMode, setViewMode] = useState<DiffViewMode>("all");
   const [diffPalette, setDiffPalette] = useState<DiffPalette>(initialDiffPalette);
   const [diffCount, setDiffCount] = useState(0);
+  const [selectedHunkCount, setSelectedHunkCount] = useState(0);
   const [editorReady, setEditorReady] = useState(false);
   const [sideSearches, setSideSearches] = useState<Record<DiffSide, SideSearchState>>({
     original: createInitialSideSearch(),
@@ -172,6 +184,9 @@ export function DiffPane({
   const editorRef = useRef<MountedDiffEditor | null>(null);
   const diffUpdateListenerRef = useRef<{ dispose: () => void } | null>(null);
   const editorDisposeListenerRef = useRef<{ dispose: () => void } | null>(null);
+  const originalSelectionListenerRef = useRef<{ dispose: () => void } | null>(null);
+  const modifiedSelectionListenerRef = useRef<{ dispose: () => void } | null>(null);
+  const diffSelectionRef = useRef<DiffLineSelection | undefined>(undefined);
   const originalSearchInputRef = useRef<HTMLInputElement | null>(null);
   const modifiedSearchInputRef = useRef<HTMLInputElement | null>(null);
   const originalSearchDecorationsRef = useRef<DecorationsCollection | null>(null);
@@ -180,13 +195,33 @@ export function DiffPane({
   const handleEditorMount: DiffOnMount = (editor) => {
     diffUpdateListenerRef.current?.dispose();
     editorDisposeListenerRef.current?.dispose();
+    originalSelectionListenerRef.current?.dispose();
+    modifiedSelectionListenerRef.current?.dispose();
     originalSearchDecorationsRef.current?.clear();
     modifiedSearchDecorationsRef.current?.clear();
     originalSearchDecorationsRef.current = null;
     modifiedSearchDecorationsRef.current = null;
     editorRef.current = editor;
     setEditorReady(true);
-    const updateDiffCount = () => setDiffCount(editor.getLineChanges()?.length ?? 0);
+    const updateSelectedHunks = (selection = diffSelectionRef.current) => {
+      setSelectedHunkCount(selectedDiffChanges(editor.getLineChanges() ?? [], selection).length);
+    };
+    const updateDiffCount = () => {
+      setDiffCount(editor.getLineChanges()?.length ?? 0);
+      updateSelectedHunks();
+    };
+    const watchSelection = (side: DiffSide, codeEditor: MountedCodeEditor) => (
+      codeEditor.onDidChangeCursorSelection((event) => {
+        diffSelectionRef.current = {
+          side,
+          startLineNumber: event.selection.startLineNumber,
+          endLineNumber: event.selection.endLineNumber,
+        };
+        updateSelectedHunks(diffSelectionRef.current);
+      })
+    );
+    originalSelectionListenerRef.current = watchSelection("original", editor.getOriginalEditor());
+    modifiedSelectionListenerRef.current = watchSelection("modified", editor.getModifiedEditor());
     diffUpdateListenerRef.current = editor.onDidUpdateDiff(() => {
       window.requestAnimationFrame(() => {
         applyCollapsedState(editor, viewModeRef.current);
@@ -200,6 +235,8 @@ export function DiffPane({
         modifiedSearchDecorationsRef.current = null;
         setEditorReady(false);
         setDiffCount(0);
+        setSelectedHunkCount(0);
+        diffSelectionRef.current = undefined;
       }
     });
     updateViewMode(editor, viewModeRef.current);
@@ -210,6 +247,23 @@ export function DiffPane({
     const editor = editorRef.current;
     if (!editor || !diffCount) return;
     editor.goToDiff(target);
+  };
+
+  const revertSelectedHunks = () => {
+    const editor = editorRef.current;
+    const selection = diffSelectionRef.current;
+    if (!editor || !diff || !selection || diff.truncated) return;
+    const result = revertSelectedDiffChanges(
+      diff.original,
+      diff.modified,
+      editor.getLineChanges() ?? [],
+      selection,
+    );
+    if (!result) return;
+    if (!window.confirm(
+      `确定将选中的 ${result.hunkCount} 处差异还原为 SVN BASE 内容吗？\n\n此操作会写入工作文件，但仍可通过 SVN 恢复。`,
+    )) return;
+    onRevertSelectedDiff(result.content, result.hunkCount);
   };
 
   const getSideEditor = (side: DiffSide) => {
@@ -328,6 +382,8 @@ export function DiffPane({
 
   useEffect(() => {
     setDiffCount(0);
+    setSelectedHunkCount(0);
+    diffSelectionRef.current = undefined;
     originalSearchDecorationsRef.current?.clear();
     modifiedSearchDecorationsRef.current?.clear();
     originalSearchDecorationsRef.current = null;
@@ -342,6 +398,8 @@ export function DiffPane({
     () => () => {
       diffUpdateListenerRef.current?.dispose();
       editorDisposeListenerRef.current?.dispose();
+      originalSelectionListenerRef.current?.dispose();
+      modifiedSelectionListenerRef.current?.dispose();
       editorRef.current = null;
     },
     [],
@@ -515,25 +573,43 @@ export function DiffPane({
                 <span>搜索 BASE</span>
               </button>
 
-              <div className="diff-change-navigation" role="group" aria-label="差异导航">
+              <div className="diff-center-tools">
+                <div className="diff-change-navigation" role="group" aria-label="差异导航">
+                  <button
+                    type="button"
+                    disabled={!editorReady || !diffCount}
+                    aria-label="上一个差异"
+                    title="跳转到上一个差异"
+                    onClick={() => navigateDiff("previous")}
+                  >
+                    <Icon name="chevron" size={13} className="previous" />
+                  </button>
+                  <span aria-live="polite"><b>{diffCount}</b> 处差异</span>
+                  <button
+                    type="button"
+                    disabled={!editorReady || !diffCount}
+                    aria-label="下一个差异"
+                    title="跳转到下一个差异"
+                    onClick={() => navigateDiff("next")}
+                  >
+                    <Icon name="chevron" size={13} className="next" />
+                  </button>
+                </div>
                 <button
                   type="button"
-                  disabled={!editorReady || !diffCount}
-                  aria-label="上一个差异"
-                  title="跳转到上一个差异"
-                  onClick={() => navigateDiff("previous")}
+                  className="diff-selection-revert"
+                  disabled={!editorReady || !selectedHunkCount || diff.truncated || revertingSelectedDiff || workspaceUpdating}
+                  title={workspaceUpdating
+                    ? "SVN Update 进行中，结束后再还原差异"
+                    : diff.truncated
+                      ? "大文件 Diff 已截断，不能安全局部还原"
+                    : selectedHunkCount
+                      ? `将选中的 ${selectedHunkCount} 处差异还原为 SVN BASE`
+                      : "先在任一侧选中一处或多处差异"}
+                  onClick={revertSelectedHunks}
                 >
-                  <Icon name="chevron" size={13} className="previous" />
-                </button>
-                <span aria-live="polite"><b>{diffCount}</b> 处差异</span>
-                <button
-                  type="button"
-                  disabled={!editorReady || !diffCount}
-                  aria-label="下一个差异"
-                  title="跳转到下一个差异"
-                  onClick={() => navigateDiff("next")}
-                >
-                  <Icon name="chevron" size={13} className="next" />
+                  {revertingSelectedDiff ? <span className="spinner" /> : <Icon name="undo" size={12} />}
+                  还原选中差异{selectedHunkCount ? ` · ${selectedHunkCount}` : ""}
                 </button>
               </div>
 

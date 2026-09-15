@@ -21,6 +21,7 @@ import type {
   SvnUpdateFinished,
   SvnUpdateStatus,
   ToolAvailability,
+  TortoiseOperationFinished,
   TortoiseSvnAvailability,
   WorkingCopyChanged,
   WorkingCopyWatchError,
@@ -136,7 +137,13 @@ function initialSidebarWidth() {
 }
 
 function normalizedPath(path: string) {
-  return path.replace(/[\\/]+$/, "").toLowerCase();
+  return path.replaceAll("/", "\\").replace(/[\\/]+$/, "").toLowerCase();
+}
+
+function pathIsWithin(path: string, directory: string) {
+  const target = normalizedPath(path);
+  const parent = normalizedPath(directory);
+  return target === parent || target.startsWith(`${parent}\\`);
 }
 
 function scopeDirectoryChange(directory: string, scan: ScanResult): ChangeEntry {
@@ -192,6 +199,7 @@ export default function App() {
   const [diff, setDiff] = useState<DiffResult>();
   const [scanLoading, setScanLoading] = useState(false);
   const [diffLoading, setDiffLoading] = useState(false);
+  const [diffReverting, setDiffReverting] = useState(false);
   const [scanError, setScanError] = useState<string>();
   const [diffError, setDiffError] = useState<string>();
   const [toast, setToast] = useState<string>();
@@ -224,6 +232,7 @@ export default function App() {
   const workspaceRef = useRef<HTMLDivElement | null>(null);
   const sidebarWidthRef = useRef(sidebarWidth);
   const finishedUpdateIdsRef = useRef(new Set<number>());
+  const finishedTortoiseOperationIdsRef = useRef(new Set<number>());
   const watcherIdRef = useRef<number | null>(null);
   const scanLoadingRef = useRef(false);
   const svnUpdateRunningRef = useRef(false);
@@ -522,6 +531,46 @@ export default function App() {
       unlistenError?.();
     };
   }, [flushAutoRefreshQueue]);
+
+  useEffect(() => {
+    let active = true;
+    let unlistenOperation: (() => void) | undefined;
+
+    void listen<TortoiseOperationFinished>("tortoise-operation-finished", (event) => {
+      if (!active || !event.payload.paths.length) return;
+      if (finishedTortoiseOperationIdsRef.current.has(event.payload.operationId)) return;
+      finishedTortoiseOperationIdsRef.current.add(event.payload.operationId);
+      const current = scanRef.current;
+      const relevantPaths = current
+        ? event.payload.paths.filter((path) => current.scopeDirectories.some(
+          (directory) => pathIsWithin(path, directory),
+        ))
+        : [];
+      if (!relevantPaths.length) return;
+      void (async () => {
+        const updated = await refreshChangedPaths(relevantPaths, false);
+        if (!active) return;
+        const labels: Record<TortoiseOperationFinished["action"], string> = {
+          commit: "提交",
+          revert: "Revert",
+          resolve: "解决冲突",
+        };
+        setToast(updated
+          ? `TortoiseSVN ${labels[event.payload.action]}窗口已关闭，已刷新相关变更。`
+          : `TortoiseSVN ${labels[event.payload.action]}窗口已关闭；自动刷新失败，请手动刷新。`);
+      })();
+    }).then((stopListening) => {
+      if (!active) stopListening();
+      else unlistenOperation = stopListening;
+    }).catch((error) => {
+      if (active) setAutoRefreshError(`无法监听 TortoiseSVN 操作：${errorMessage(error)}`);
+    });
+
+    return () => {
+      active = false;
+      unlistenOperation?.();
+    };
+  }, [refreshChangedPaths]);
 
   const activeScopeKey = scan ? scopeSetKey(scan.scopeDirectories) : "";
   useEffect(() => {
@@ -834,6 +883,74 @@ export default function App() {
       setFileReloading(false);
     }
   }, [storeDiffCache]);
+
+  const revertSelectedDiff = useCallback(async (content: string, hunkCount: number) => {
+    const current = scanRef.current;
+    const change = selectedRef.current;
+    const currentDiff = diff;
+    if (
+      !current
+      || !change
+      || !currentDiff
+      || currentDiff.path !== change.path
+      || currentDiff.isBinary
+      || currentDiff.isDirectory
+      || currentDiff.truncated
+      || diffReverting
+      || svnUpdateRunningRef.current
+    ) return;
+
+    setDiffReverting(true);
+    setToast(undefined);
+    try {
+      const savedFingerprint = await invoke<FileFingerprint>("save_working_file_content", {
+        path: change.path,
+        expectedContent: currentDiff.modified,
+        content,
+        fallbackEncoding: currentDiff.modifiedBytes
+          ? currentDiff.modifiedEncoding
+          : currentDiff.originalEncoding,
+        directory: current.directory,
+        scopeDirectories: current.scopeDirectories,
+        wcRoot: current.wcRoot,
+      });
+      if (normalizedPath(selectedRef.current?.path ?? "") === normalizedPath(change.path)) {
+        watchBaselineRef.current = { path: change.path, fingerprint: savedFingerprint };
+      }
+
+      pendingFileUpdateRef.current = undefined;
+      setPendingFileUpdate(undefined);
+      const updated = await refreshChangedPaths([change.path], false);
+      const refreshedChange = updated?.changes.find(
+        (candidate) => normalizedPath(candidate.path) === normalizedPath(change.path),
+      );
+      if (!updated) {
+        setToast(`已还原 ${hunkCount} 处差异，但状态刷新失败；请手动刷新当前目录。`);
+        return;
+      }
+      if (!refreshedChange) {
+        setToast(`已还原 ${hunkCount} 处差异；文件已回到干净状态。`);
+        return;
+      }
+
+      const [result, fingerprint] = await Promise.all([
+        getFileDiff(refreshedChange),
+        getFileFingerprint(refreshedChange.path),
+      ]);
+      if (normalizedPath(selectedRef.current?.path ?? "") === normalizedPath(refreshedChange.path)) {
+        storeDiffCache(refreshedChange, fingerprint, result);
+        watchBaselineRef.current = { path: refreshedChange.path, fingerprint };
+        setDiffError(undefined);
+        setDiff(result);
+        setPropertyDiffState(undefined);
+      }
+      setToast(`已将选中的 ${hunkCount} 处差异还原为 SVN BASE。`);
+    } catch (error) {
+      setToast(errorMessage(error));
+    } finally {
+      setDiffReverting(false);
+    }
+  }, [diff, diffReverting, refreshChangedPaths, storeDiffCache]);
 
   const updateAllTextDiffs = useCallback(async () => {
     if (svnUpdate.running) {
@@ -1151,7 +1268,9 @@ export default function App() {
         directory: scan.directory,
         wcRoot: scan.wcRoot,
       });
-      setToast(result.message);
+      if (!finishedTortoiseOperationIdsRef.current.has(result.operationId)) {
+        setToast(result.message);
+      }
     } catch (error) {
       setToast(errorMessage(error));
     } finally {
@@ -1163,8 +1282,17 @@ export default function App() {
     await launchTortoiseCommit(commitChanges.map((change) => change.path));
   }, [commitChanges, launchTortoiseCommit]);
 
-  const handleItemAction = useCallback(async (action: ChangeItemAction, change: ChangeEntry) => {
+  const handleItemAction = useCallback(async (
+    action: ChangeItemAction,
+    change: ChangeEntry,
+    targets: ChangeEntry[] = [change],
+  ) => {
     if (!scan) return;
+    const uniqueTargets = targets.filter((target, index) => (
+      targets.findIndex(
+        (candidate) => normalizedPath(candidate.path) === normalizedPath(target.path),
+      ) === index
+    ));
     if (action === "removeScope") {
       await removeScanDirectory(change.path);
       return;
@@ -1174,7 +1302,10 @@ export default function App() {
         setToast("当前已有扫描或 SVN Update 正在运行，请稍后再刷新此项");
         return;
       }
-      await refreshChangedPaths(change.refreshPaths?.length ? change.refreshPaths : [change.path], true);
+      const refreshPaths = uniqueTargets.flatMap(
+        (target) => target.refreshPaths?.length ? target.refreshPaths : [target.path],
+      );
+      await refreshChangedPaths(refreshPaths, true);
       return;
     }
     if (
@@ -1187,14 +1318,30 @@ export default function App() {
     setToast(undefined);
     try {
       if (action === "copyRelativePath" || action === "copyFullPath") {
-        const value = action === "copyRelativePath" ? change.relativePath : change.path;
+        const values = uniqueTargets.map(
+          (target) => action === "copyRelativePath" ? target.relativePath : target.path,
+        );
+        const value = values.join("\r\n");
         await copyText(value);
-        setToast(`已复制${action === "copyRelativePath" ? "相对" : "完整"}路径：${value}`);
+        setToast(uniqueTargets.length > 1
+          ? `已复制 ${uniqueTargets.length} 个${action === "copyRelativePath" ? "相对" : "完整"}路径`
+          : `已复制${action === "copyRelativePath" ? "相对" : "完整"}路径：${value}`);
         return;
       }
 
       if (action === "commit") {
-        await launchTortoiseCommit([change.path]);
+        await launchTortoiseCommit(uniqueTargets.map((target) => target.path));
+        return;
+      }
+
+      if (uniqueTargets.length > 1 && (action === "revert" || action === "resolve")) {
+        const message = await invoke<string>("open_tortoise_svn_batch_action", {
+          action,
+          paths: uniqueTargets.map((target) => target.path),
+          directory: scan.directory,
+          wcRoot: scan.wcRoot,
+        });
+        setToast(message);
         return;
       }
 
@@ -1458,7 +1605,7 @@ export default function App() {
               onClearCommitSelection={clearCommitSelection}
               onCommitSelection={() => void openTortoiseCommit()}
               onUpdateAllTextDiffs={() => void updateAllTextDiffs()}
-              onItemAction={(action, change) => void handleItemAction(action, change)}
+              onItemAction={(action, change, targets) => void handleItemAction(action, change, targets)}
             />
           </aside>
 
@@ -1500,6 +1647,11 @@ export default function App() {
               }}
               onMarkResolved={() => {
                 if (selected) void handleItemAction("resolve", selected);
+              }}
+              workspaceUpdating={svnUpdate.running}
+              revertingSelectedDiff={diffReverting}
+              onRevertSelectedDiff={(content, hunkCount) => {
+                void revertSelectedDiff(content, hunkCount);
               }}
               propertyDiff={activePropertyDiff?.value}
               propertyDiffLoading={activePropertyDiff?.loading ?? false}
@@ -1550,7 +1702,7 @@ export default function App() {
             && !scanLoading
             && !svnUpdate.running
             && !svnUpdateLaunching}
-          onAction={(action, change) => void handleItemAction(action, change)}
+          onAction={(action, change, targets) => void handleItemAction(action, change, targets)}
           onClose={closeScopeContextMenu}
         />
       )}

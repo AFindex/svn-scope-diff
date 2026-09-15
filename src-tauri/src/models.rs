@@ -34,7 +34,17 @@ pub struct TortoiseSvnAvailability {
 #[serde(rename_all = "camelCase")]
 pub struct CommitLaunchResult {
     pub selected_count: usize,
+    pub operation_id: u64,
     pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TortoiseOperationFinished {
+    pub operation_id: u64,
+    pub action: String,
+    pub paths: Vec<String>,
+    pub exit_code: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize)]

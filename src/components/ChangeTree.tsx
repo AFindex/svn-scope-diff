@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { actionPathKey, type ActionSelectionModifiers } from "../actionSelection";
 import { conflictLabel, isConflictedChange } from "../changeItemActions";
 import { commitPathKey, isCommitSelectable } from "../commitSelection";
 import { displayStatusCode } from "../status";
@@ -12,9 +13,13 @@ interface ChangeTreeProps {
   scopeDirectories: string[];
   changes: ChangeEntry[];
   selectedPath?: string;
+  selectedActionPaths: ReadonlySet<string>;
   selectedCommitPaths: ReadonlySet<string>;
-  query: string;
-  onSelect: (change: ChangeEntry) => void;
+  onSelect: (
+    change: ChangeEntry,
+    modifiers: ActionSelectionModifiers,
+    orderedChanges: ChangeEntry[],
+  ) => void;
   onToggleCommitSelection: (changes: ChangeEntry[], checked: boolean) => void;
   onOpenContextMenu: (
     change: ChangeEntry,
@@ -126,19 +131,24 @@ export function ChangeTree({
   scopeDirectories,
   changes,
   selectedPath,
+  selectedActionPaths,
   selectedCommitPaths,
-  query,
   onSelect,
   onToggleCommitSelection,
   onOpenContextMenu,
 }: ChangeTreeProps) {
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
-  const filtered = useMemo(() => {
-    const normalized = query.trim().toLocaleLowerCase();
-    if (!normalized) return changes;
-    return changes.filter((change) => change.relativePath.toLocaleLowerCase().includes(normalized));
-  }, [changes, query]);
-  const tree = useMemo(() => buildTree(filtered), [filtered]);
+  const tree = useMemo(() => buildTree(changes), [changes]);
+  const visibleOrderedChanges = useMemo(() => {
+    const ordered: ChangeEntry[] = [];
+    const visit = (node: TreeNode) => {
+      if (node.change) ordered.push(node.change);
+      if (!node.isFolder || collapsed.has(node.key)) return;
+      node.children.forEach(visit);
+    };
+    tree.forEach(visit);
+    return ordered;
+  }, [collapsed, tree]);
   const selectedCounts = useMemo(() => {
     const counts = new Map<string, number>();
     const visit = (node: TreeNode): number => {
@@ -167,6 +177,9 @@ export function ChangeTree({
   const renderNode = (node: TreeNode, level: number) => {
     const isCollapsed = collapsed.has(node.key);
     const isSelected = node.change?.path === selectedPath;
+    const actionSelected = Boolean(
+      node.change && selectedActionPaths.has(actionPathKey(node.change.path)),
+    );
     const directConflict = Boolean(node.change && isConflictedChange(node.change));
     const contextChange = contextChangeForNode(node, scopeDirectory, scopeDirectories);
     const commitChanges = node.selectableChanges;
@@ -179,12 +192,12 @@ export function ChangeTree({
     return (
       <div key={node.key} className="tree-branch">
         <div
-          className={`tree-row ${isSelected ? "selected" : ""} ${selectionState !== "none" ? "commit-selected" : ""} ${node.conflictCount ? "conflicted" : ""}`}
+          className={`tree-row ${isSelected ? "selected" : ""} ${actionSelected ? "action-selected" : ""} ${selectionState !== "none" ? "commit-selected" : ""} ${node.conflictCount ? "conflicted" : ""}`}
+          aria-selected={node.change ? actionSelected : undefined}
           style={{ paddingLeft: 4 + level * 16 }}
           title={node.change ? `${statusTitle(node.change)} · ${node.change.relativePath}` : node.name}
           onContextMenu={(event) => {
             event.preventDefault();
-            if (node.change) onSelect(node.change);
             const bounds = event.currentTarget.getBoundingClientRect();
             onOpenContextMenu(
               contextChange,
@@ -222,8 +235,17 @@ export function ChangeTree({
           <button
             type="button"
             className="tree-open-target"
-            onClick={() => {
-              if (node.change) onSelect(node.change);
+            onClick={(event) => {
+              if (node.change) {
+                onSelect(
+                  node.change,
+                  {
+                    toggle: event.ctrlKey || event.metaKey,
+                    range: event.shiftKey,
+                  },
+                  visibleOrderedChanges,
+                );
+              }
               else if (node.isFolder) toggle(node.key);
             }}
             onDoubleClick={() => node.isFolder && toggle(node.key)}
@@ -255,8 +277,5 @@ export function ChangeTree({
     );
   };
 
-  if (!filtered.length && changes.length) {
-    return <div className="tree-no-results">没有匹配“{query}”的变更</div>;
-  }
   return <div className="change-tree" role="tree" aria-label="本地修改层级">{tree.map((node) => renderNode(node, 0))}</div>;
 }

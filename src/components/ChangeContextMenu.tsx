@@ -18,13 +18,18 @@ import { Icon } from "./Icons";
 
 interface ChangeContextMenuProps {
   change: ChangeEntry;
+  targets?: ChangeEntry[];
   x: number;
   y: number;
   tortoiseAvailable: boolean;
   workspaceUpdating: boolean;
   scopeDirectory?: boolean;
   canRemoveScope?: boolean;
-  onAction: (action: ChangeItemAction, change: ChangeEntry) => void;
+  onAction: (
+    action: ChangeItemAction,
+    change: ChangeEntry,
+    targets: ChangeEntry[],
+  ) => void;
   onClose: (restoreFocus?: boolean) => void;
 }
 
@@ -65,6 +70,7 @@ function MenuItem({
 
 export function ChangeContextMenu({
   change,
+  targets,
   x,
   y,
   tortoiseAvailable,
@@ -76,16 +82,28 @@ export function ChangeContextMenu({
 }: ChangeContextMenuProps) {
   const menuRef = useRef<HTMLDivElement>(null);
   const [position, setPosition] = useState({ left: x, top: y });
+  const selectedTargets = targets?.length ? targets : [change];
+  const batch = selectedTargets.length > 1;
   const capabilities = changeActionCapabilities(change, tortoiseAvailable);
+  const committableTargets = selectedTargets.filter((target) => (
+    !target.contextOnly
+    && !(target.item === "unversioned" && target.isDirectory)
+    && !isConflictedChange(target)
+  ));
+  const revertibleTargets = selectedTargets.filter(
+    (target) => target.item !== "unversioned" && !target.contextOnly,
+  );
+  const resolvableTargets = selectedTargets.filter(isConflictedChange);
   const conflicted = isConflictedChange(change);
   const virtualDirectory = change.isDirectory && Boolean(change.contextOnly);
   const hasRepositoryHistory = change.item !== "unversioned"
     && change.baseRevision !== null
     && !["added", "obstructed", "incomplete"].includes(change.item);
-  const showRevert = !change.isDirectory
-    || (!change.contextOnly && change.item !== "unversioned");
-  const showBlame = !change.isDirectory;
-  const showLog = !change.isDirectory || hasRepositoryHistory;
+  const showRevert = batch
+    ? revertibleTargets.length > 0
+    : !change.isDirectory || (!change.contextOnly && change.item !== "unversioned");
+  const showBlame = !batch && !change.isDirectory;
+  const showLog = !batch && (!change.isDirectory || hasRepositoryHistory);
   const showRepositorySection = showRevert || showBlame || showLog;
   const unavailableTitle = tortoiseAvailable ? undefined : "未检测到 TortoiseSVN";
   const updateBlockedTitle = "SVN Update 进行中，请完成或取消后再执行此操作";
@@ -119,9 +137,9 @@ export function ChangeContextMenu({
     };
   }, [onClose]);
 
-  const choose = (action: ChangeItemAction) => {
+  const choose = (action: ChangeItemAction, actionTargets = selectedTargets) => {
     onClose(false);
-    onAction(action, change);
+    onAction(action, change, actionTargets);
   };
 
   const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
@@ -153,7 +171,7 @@ export function ChangeContextMenu({
       className="change-context-menu"
       style={position}
       role="menu"
-      aria-label={`${change.relativePath} 常用操作`}
+      aria-label={batch ? `${selectedTargets.length} 个已选变更的常用操作` : `${change.relativePath} 常用操作`}
       onContextMenu={(event) => event.preventDefault()}
       onKeyDown={handleKeyDown}
     >
@@ -166,9 +184,10 @@ export function ChangeContextMenu({
           </span>
         )}
         <span>
-          <strong title={change.relativePath}>{change.name}</strong>
-          <small title={change.relativePath}>{change.relativePath}</small>
+          <strong title={change.relativePath}>{batch ? `已选 ${selectedTargets.length} 项变更` : change.name}</strong>
+          <small title={change.relativePath}>{batch ? `${change.relativePath} 等` : change.relativePath}</small>
         </span>
+        {batch && <span className="change-context-batch-chip">批量</span>}
         {scopeDirectory && <span className="change-context-scope-chip">扫描范围</span>}
         {conflicted && (
           <span className="change-context-conflict" title={conflictLabel(change)}>
@@ -181,12 +200,14 @@ export function ChangeContextMenu({
       <div className="change-context-section">
         <MenuItem
           icon="refresh"
-          label={change.isDirectory ? "局部刷新此目录" : "刷新此项状态"}
+          label={batch ? `刷新所选 ${selectedTargets.length} 项` : change.isDirectory ? "局部刷新此目录" : "刷新此项状态"}
           hint="仅此范围"
           disabled={workspaceUpdating}
           title={workspaceUpdating
             ? updateBlockedTitle
-            : change.isDirectory
+            : batch
+              ? "只重新扫描当前操作选择中的路径"
+              : change.isDirectory
               ? "只重新扫描此目录及其子目录"
               : "只重新读取此文件的 SVN 状态"}
           onSelect={() => choose("refresh")}
@@ -199,28 +220,32 @@ export function ChangeContextMenu({
           <div className="change-context-section">
             <MenuItem
               icon="commit"
-              label="单独提交此项…"
+              label={batch ? `提交所选 ${committableTargets.length} 项…` : "单独提交此项…"}
               hint="TortoiseSVN"
-              disabled={workspaceUpdating || !capabilities.canCommit}
+              disabled={workspaceUpdating || !tortoiseAvailable || !committableTargets.length}
               title={workspaceUpdating
                 ? updateBlockedTitle
-                : capabilities.canCommit
-                ? "只将此项目标交给 TortoiseSVN 提交窗口"
+                : !tortoiseAvailable
+                  ? unavailableTitle
+                : committableTargets.length
+                ? batch
+                  ? `将 ${committableTargets.length} 个可提交目标交给 TortoiseSVN`
+                  : "只将此项目标交给 TortoiseSVN 提交窗口"
                 : unavailableTitle
                   ?? (conflicted
                     ? "请先解决冲突后再提交"
                     : "未版本化目录不能作为精确单项提交目标")}
-              onSelect={() => choose("commit")}
+              onSelect={() => choose("commit", committableTargets)}
             />
           </div>
         </>
       )}
 
-      {conflicted && (
+      {(conflicted || resolvableTargets.length > 0) && (
         <>
           <div className="change-context-separator" />
           <div className="change-context-section conflict-actions">
-            {!change.isDirectory && (
+            {!batch && !change.isDirectory && (
               <MenuItem
                 icon="conflict"
                 label="打开冲突编辑器…"
@@ -236,14 +261,16 @@ export function ChangeContextMenu({
             )}
             <MenuItem
               icon="check"
-              label="标记为已解决…"
-              disabled={workspaceUpdating || !capabilities.canResolve}
+              label={batch ? `标记 ${resolvableTargets.length} 个冲突为已解决…` : "标记为已解决…"}
+              disabled={workspaceUpdating || !tortoiseAvailable || !resolvableTargets.length}
               title={workspaceUpdating
                 ? updateBlockedTitle
-                : capabilities.canResolve
+                : !tortoiseAvailable
+                  ? unavailableTitle
+                : resolvableTargets.length
                 ? "由 TortoiseSVN 再次确认后标记为已解决"
                 : unavailableTitle}
-              onSelect={() => choose("resolve")}
+              onSelect={() => choose("resolve", resolvableTargets)}
             />
           </div>
         </>
@@ -256,15 +283,17 @@ export function ChangeContextMenu({
             {showRevert && (
               <MenuItem
                 icon="undo"
-                label="Revert 修改…"
-                disabled={workspaceUpdating || !capabilities.canRevert}
+                label={batch ? `Revert 所选 ${revertibleTargets.length} 项…` : "Revert 修改…"}
+                disabled={workspaceUpdating || !tortoiseAvailable || !revertibleTargets.length}
                 title={workspaceUpdating
                   ? updateBlockedTitle
-                  : capabilities.canRevert
+                  : !tortoiseAvailable
+                    ? unavailableTitle
+                  : revertibleTargets.length
                   ? "打开 TortoiseSVN Revert 确认窗口，不会静默还原"
                   : unavailableTitle ?? "未版本化项目没有可还原的 BASE 内容"}
                 danger
-                onSelect={() => choose("revert")}
+                onSelect={() => choose("revert", revertibleTargets)}
               />
             )}
             {showBlame && (
@@ -297,32 +326,36 @@ export function ChangeContextMenu({
         </>
       )}
 
-      <div className="change-context-separator" />
-      <div className="change-context-section">
-        <MenuItem
-          icon="file"
-          label={change.isDirectory ? "打开目录" : "打开"}
-          disabled={!capabilities.canOpen}
-          title={capabilities.canOpen ? "使用系统默认程序打开" : "项目在工作副本中已不存在"}
-          onSelect={() => choose("open")}
-        />
-        <MenuItem
-          icon="locate"
-          label="在资源管理器中显示"
-          onSelect={() => choose("reveal")}
-        />
-      </div>
+      {!batch && (
+        <>
+          <div className="change-context-separator" />
+          <div className="change-context-section">
+            <MenuItem
+              icon="file"
+              label={change.isDirectory ? "打开目录" : "打开"}
+              disabled={!capabilities.canOpen}
+              title={capabilities.canOpen ? "使用系统默认程序打开" : "项目在工作副本中已不存在"}
+              onSelect={() => choose("open")}
+            />
+            <MenuItem
+              icon="locate"
+              label="在资源管理器中显示"
+              onSelect={() => choose("reveal")}
+            />
+          </div>
+        </>
+      )}
 
       <div className="change-context-separator" />
       <div className="change-context-section">
         <MenuItem
           icon="copy"
-          label="复制相对路径"
+          label={batch ? `复制 ${selectedTargets.length} 个相对路径` : "复制相对路径"}
           onSelect={() => choose("copyRelativePath")}
         />
         <MenuItem
           icon="copy"
-          label="复制完整路径"
+          label={batch ? `复制 ${selectedTargets.length} 个完整路径` : "复制完整路径"}
           onSelect={() => choose("copyFullPath")}
         />
       </div>

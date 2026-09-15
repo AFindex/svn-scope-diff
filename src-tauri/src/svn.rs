@@ -1,4 +1,5 @@
 use crate::models::{ChangeEntry, DiffResult, FileFingerprint, ScanPatch, ScanResult};
+use crate::path_scope::{validate_scope, validate_target};
 use encoding_rs::{GBK, UTF_16BE, UTF_16LE};
 use quick_xml::de::from_str;
 use serde::Deserialize;
@@ -393,6 +394,102 @@ pub fn file_fingerprint(path: &str) -> Result<FileFingerprint, String> {
         }),
         Err(error) => Err(format!("无法读取文件状态 {path}：{error}")),
     }
+}
+
+pub fn save_working_file_content(
+    path: &str,
+    expected_content: &str,
+    content: &str,
+    fallback_encoding: &str,
+    directory: &str,
+    scope_directories: &[String],
+    wc_root: &str,
+) -> Result<FileFingerprint, String> {
+    if expected_content.len() > MAX_TEXT_BYTES || content.len() > MAX_TEXT_BYTES {
+        return Err("文件内容超过内嵌 Diff 的安全写入上限，已拒绝保存。".to_owned());
+    }
+    let (scope, working_copy_root) = validate_scope(directory, wc_root)?;
+    let target = validate_target(path, &scope, &working_copy_root, "局部还原目标")?;
+    if scope_directories.is_empty() {
+        return Err("当前没有可用于局部还原的扫描范围。".to_owned());
+    }
+    let mut declared_scopes = Vec::with_capacity(scope_directories.len());
+    for directory in scope_directories {
+        let declared = absolute_path(directory, "扫描范围")?;
+        if !path_is_within(&declared, &working_copy_root) {
+            return Err("扫描范围与当前 SVN 工作副本不一致。".to_owned());
+        }
+        declared_scopes.push(declared);
+    }
+    if !declared_scopes
+        .iter()
+        .any(|declared| path_is_within(&target, declared))
+    {
+        return Err("局部还原目标不在当前实际扫描范围内，已拒绝写入。".to_owned());
+    }
+    let canonical_scopes = declared_scopes
+        .iter()
+        .map(|declared| {
+            fs::canonicalize(declared)
+                .map_err(|error| format!("无法解析扫描范围 {}：{error}", declared.display()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let canonical_root = fs::canonicalize(&working_copy_root).map_err(|error| {
+        format!(
+            "无法解析 SVN 工作副本根目录 {}：{error}",
+            working_copy_root.display()
+        )
+    })?;
+    let canonical_target = if target.exists() {
+        fs::canonicalize(&target)
+            .map_err(|error| format!("无法解析工作文件 {}：{error}", target.display()))?
+    } else {
+        let parent = target
+            .parent()
+            .ok_or_else(|| format!("无法确定工作文件父目录：{}", target.display()))?;
+        let file_name = target
+            .file_name()
+            .ok_or_else(|| format!("无法确定工作文件名：{}", target.display()))?;
+        fs::canonicalize(parent)
+            .map_err(|error| format!("无法解析工作文件父目录 {}：{error}", parent.display()))?
+            .join(file_name)
+    };
+    if !canonical_scopes
+        .iter()
+        .any(|declared| path_is_within(&canonical_target, declared))
+        || !path_is_within(&canonical_target, &canonical_root)
+    {
+        return Err("局部还原目标通过链接指向了当前扫描范围之外，已拒绝写入。".to_owned());
+    }
+    if target.is_dir() {
+        return Err("目录不能执行文本差异局部还原。".to_owned());
+    }
+
+    let current_bytes = match fs::read(&canonical_target) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(format!("无法读取工作文件 {}：{error}", target.display())),
+    };
+    if current_bytes.len() > MAX_TEXT_BYTES {
+        return Err("工作文件在操作前已超过内嵌 Diff 的安全写入上限。".to_owned());
+    }
+    if looks_binary(&current_bytes) {
+        return Err("工作文件已变为二进制内容，已拒绝覆盖。".to_owned());
+    }
+    let current = decode_text(&current_bytes);
+    if current.text != expected_content {
+        return Err("工作文件在操作前已发生变化；请重新加载 Diff 后再试。".to_owned());
+    }
+
+    let encoding = if current_bytes.is_empty() {
+        fallback_encoding
+    } else {
+        current.encoding.as_str()
+    };
+    let encoded = encode_text(content, encoding)?;
+    fs::write(&canonical_target, encoded)
+        .map_err(|error| format!("无法写入工作文件 {}：{error}", target.display()))?;
+    file_fingerprint(path)
 }
 
 pub fn svn_base_bytes(path: &Path) -> Result<Vec<u8>, String> {
@@ -868,6 +965,43 @@ fn decode_text(bytes: &[u8]) -> DecodedText {
             "GBK"
         }
         .to_owned(),
+    }
+}
+
+fn encode_text(text: &str, encoding: &str) -> Result<Vec<u8>, String> {
+    match encoding {
+        "UTF-8" => Ok(text.as_bytes().to_vec()),
+        "UTF-8 BOM" => {
+            let mut bytes = vec![0xEF, 0xBB, 0xBF];
+            bytes.extend_from_slice(text.as_bytes());
+            Ok(bytes)
+        }
+        "UTF-16 LE" => {
+            let mut bytes = vec![0xFF, 0xFE];
+            for unit in text.encode_utf16() {
+                bytes.extend_from_slice(&unit.to_le_bytes());
+            }
+            Ok(bytes)
+        }
+        "UTF-16 BE" => {
+            let mut bytes = vec![0xFE, 0xFF];
+            for unit in text.encode_utf16() {
+                bytes.extend_from_slice(&unit.to_be_bytes());
+            }
+            Ok(bytes)
+        }
+        "GBK" => {
+            let (bytes, _, had_errors) = GBK.encode(text);
+            if had_errors {
+                Err("还原后的内容包含 GBK 无法表示的字符，已拒绝保存。".to_owned())
+            } else {
+                Ok(bytes.into_owned())
+            }
+        }
+        "GBK（替换无效字节）" => {
+            Err("原文件包含无效 GBK 字节，无法安全执行局部还原。".to_owned())
+        }
+        _ => Err(format!("不支持按 {encoding} 编码写回工作文件。")),
     }
 }
 
