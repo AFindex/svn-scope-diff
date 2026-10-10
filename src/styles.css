@@ -3332,9 +3332,8 @@ button:disabled {
   }
 }
 
-.status-filters { display: flex; flex-wrap: wrap; gap: 4px; margin: 8px 0; }
-.status-filters button, .editor-status button { border: 1px solid var(--border); border-radius: 4px; padding: 3px 7px; background: white; cursor: pointer; font-size: 12px; }
-.status-filters button[aria-pressed="true"] { background: var(--blue-soft); border-color: var(--blue); color: var(--blue-dark); }
+.status-filter-select { margin-bottom: 6px; }
+.editor-status button { border: 1px solid var(--border); border-radius: 4px; padding: 3px 7px; background: white; cursor: pointer; font-size: 12px; }
 .recent-directories { max-width: 150px; padding: 6px; border: 1px solid var(--border); border-radius: 5px; }
 .recent-folder-list { display: flex; flex-direction: column; gap: 5px; margin-top: 20px; max-height: 240px; overflow: auto; text-align: left; }
 .recent-folder-list button { text-align: left; background: white; border: 1px solid var(--border-soft); padding: 7px; cursor: pointer; overflow-wrap: anywhere; }

@@ -22,6 +22,7 @@ import type { ChangeEntry, TortoiseSvnAvailability } from "../types";
 import { ChangeList, type ChangeListSortKey, type SortDirection } from "./ChangeList";
 import { ChangeContextMenu } from "./ChangeContextMenu";
 import { ChangeTree } from "./ChangeTree";
+import { StatusFilterSelect } from "./StatusFilterSelect";
 import { ExtensionFilterSelect } from "./ExtensionFilterSelect";
 import { Icon } from "./Icons";
 
@@ -332,14 +333,11 @@ export function ChangesPanel({
           </span>
         </div>
 
-        <div className="status-filters" role="group" aria-label="修改状态筛选">
-          <button type="button" aria-pressed={!statusFilters.length} onClick={() => setStatusFilters([])}>全部状态</button>
-          {Object.entries({ M: "修改", A: "新增", D: "删除", R: "替换", C: "冲突", "!": "丢失", "?": "未版本化", "~": "阻塞", G: "合并" }).map(([code, label]) => (
-            <button type="button" key={code} aria-pressed={statusFilters.includes(code)} onClick={() => setStatusFilters((current) => current.includes(code) ? current.filter((item) => item !== code) : [...current, code])}>
-              {label} {changes.filter((change) => (change.treeConflicted || change.properties === "conflicted" ? "C" : change.statusCode) === code).length}
-            </button>
-          ))}
-        </div>
+        <StatusFilterSelect
+          changes={changes}
+          selectedValues={statusFilters}
+          onChange={setStatusFilters}
+        />
         <div className="combined-filter-fields">
           <SearchField
             value={filterText}
