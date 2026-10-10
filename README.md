@@ -4,6 +4,16 @@
 
 ![SVN Scope 界面预览](docs/svn-scope-preview.png)
 
+## 0.4.0 交互与刷新改进
+
+- 点击树中的目录名称，右侧列出该目录下所有变更文件；箭头单独控制展开/折叠，文件项可继续进入 Diff。
+- 修改状态支持多选，并与文件名、目录路径、扩展名组合筛选；“全部状态”重置条件。
+- 工作副本侧支持文本编辑、Ctrl+S 保存、光标行列和选中字数显示。BASE 保持只读；未保存时切换文件、目录、关闭窗口会提示，刷新保留草稿。保存复用编码与磁盘内容校验，不覆盖外部修改。
+- 代码区右键提供剪切/复制/粘贴、撤销/重做、保存，以及还原光标处或选中差异；还原会再次确认，未提交修改不能靠 SVN 找回。
+- 启动页和顶部“最近目录”记录最近 12 个成功打开的文件夹，按 Windows 路径去重。
+- 自动刷新在扫描期间保留事件，失败路径每 3 秒重试；局部扫描串行处理并丢弃完整扫描之前的旧结果。持续写入最长 2 秒发送一批，监听溢出和 SVN 元数据变化触发范围刷新。异常显示具体原因，并提供“重新监听并刷新”。
+- 启动时自动检查客户端新版；下载后校验 ZIP 的 SHA-256，点击“重启并更新”替换 EXE 并保留 `.backup`。发布源为本仓库 GitHub Releases，不上传工作副本内容。
+
 ## 已实现
 
 - 支持选择一个或多个同工作副本内的小目录作为扫描范围；分别执行 `svn status --xml --depth infinity <目录>` 后合并结果，不会为了展示公共层级而扫描父目录。扫描范围可以随时添加或移除。
@@ -22,7 +32,7 @@
 - diff 顶部右侧可直接在“差异 / 全部”间切换：“差异”折叠长段未修改内容，“全部”显示完整文件。
 - Diff 配色可在“按状态区分 / 蓝橙高对比 / 经典红绿”间切换并自动记忆。默认按状态区分时，新增与未版本化文件使用蓝紫色整文件高亮，普通修改仍使用红/绿双向对照。
 - Diff 工具栏显示差异块总数，并可循环跳转到上一个/下一个差异；BASE 与工作副本各有独立的常驻搜索栏、命中数及上/下一个结果导航，两个搜索框可以同时保持打开。在“差异”模式中命中折叠行会自动展开并定位；窄窗口仍保持双栏。
-- 在 BASE 或工作副本侧选中一处或跨多处差异后，可直接“还原选中差异”。写入前会再次确认，并校验磁盘内容仍与当前 Diff 一致；UTF-8/BOM、UTF-16 与有效 GBK 会按原编码写回，大文件、二进制或已在外部更新的文件会拒绝覆盖。
+- 在 BASE 或工作副本侧选中一处或跨多处差异后，可在代码区右键选择“还原光标处 / 选中的差异”。写入前会再次确认，并校验磁盘内容仍与当前 Diff 一致；UTF-8/BOM、UTF-16 与有效 GBK 会按原编码写回，大文件、二进制或已在外部更新的文件会拒绝覆盖。
 - 左侧变更区和右侧 diff 各自独立滚动；右侧启用 Monaco Diff Overview Ruler，以当前配色标记整份文件中的删除与新增，当前视口可点击或拖动定位；普通滚动条保持独立细尺寸。
 - 扫描合并 SVN 元数据查询并缓存工具探测；文本 diff 复用扫描得到的文件类型与 BASE revision，属性差异仅在展开时读取。
 - 普通浏览时最近 12 个文本 diff 使用内存 LRU 缓存；切回文件时只校验大小与纳秒级修改时间，未更新就不再读取工作文件或调用 `svn cat`。
@@ -105,17 +115,17 @@ npm run portable
 
 ```text
 dist-portable\
-├─ SVN Scope 0.3.0\
+├─ SVN Scope 0.4.0\
 │  ├─ SVN Scope.exe
 │  ├─ Register-ContextMenu.cmd
 │  ├─ Unregister-ContextMenu.cmd
 │  ├─ 对应 PowerShell 脚本
 │  ├─ README-便携版.txt
 │  └─ SHA256SUMS.txt
-└─ SVN-Scope-0.3.0-win-x64.zip
+└─ SVN-Scope-0.4.0-win-x64.zip
 ```
 
-首次构建会下载 npm/crates.io 依赖；之后是纯本机构建。产物不包含安装器、自动更新器、遥测或云服务。
+首次构建会下载 npm/crates.io 依赖；之后是纯本机构建。产物不包含安装器或遥测；客户端更新会连接本仓库 GitHub Releases。
 
 ## 使用便携版
 
@@ -149,3 +159,17 @@ dist-portable\
 - [Subversion `svn cat`](https://svnbook.red-bean.com/en/1.8/svn.ref.svn.c.cat.html)
 - [TortoiseSVN command-line automation](https://tortoisesvn.net/docs/release/TortoiseSVN_en/tsvn-automation.html)
 - [Beyond Compare command-line reference](https://www.scootersoftware.com/v5help/command_line_reference.html)
+
+## 客户端更新发布
+
+维护者推送与应用版本一致的 `v0.4.0` 等标签后，`.github/workflows/release.yml` 构建便携 ZIP 并发布 `update.json`。清单包含 `version` 和 ZIP 的 `sha256`；下载地址固定在本仓库对应标签，不接受任意外部安装地址。SHA-256 用于完整性校验，发布渠道依赖 GitHub HTTPS，不是独立的代码签名。
+
+旧的 0.3.0 客户端没有更新入口，需手动安装一次含此功能的版本。尚未发布 Release 或清单时，客户端会显示发布源不可用；本 PR 不会自行发布正式版本。
+
+更新前请保存编辑并结束 SVN 操作。需要对客户端目录有写权限；EXE 被其他实例占用、网络/代理失败、校验不一致都会阻止安装。安装脚本等待旧进程退出，失败时尝试恢复备份；记录位于 `%TEMP%/svn-scope-update-<进程号>/install.log`，旧程序在原 EXE 旁的 `.backup` 文件中。
+
+## 刷新异常排查与验证
+
+已修复：未版本化目录内部文件无法直接查询状态而从列表消失、扫描期间丢事件、失败后丢队列、并发扫描旧结果覆盖、Windows 短目录名与 SVN 返回长路径不一致、连续写入无限延迟，以及只改 SVN 元数据时漏刷新。系统监听错误会保留原始原因。仍可能遇到目录被删除/移动、文件权限不足、SVN 工作副本锁定/损坏或外部工具持续修改；这些情况需要恢复路径/权限、等待外部操作或用 SVN 检查工作副本，不自动执行 cleanup/revert。
+
+验证命令：`npm run test:frontend`、`npm run build`、`cargo test --manifest-path src-tauri/Cargo.toml`。本机测试使用临时 SVN 仓库，不操作实际项目。运行 `npm run dev` 后可打开 `http://localhost:1420/tests/preview.html` 验证前端交互；此页面使用模拟 IPC，不读写真实工作副本，也不能实际安装更新。

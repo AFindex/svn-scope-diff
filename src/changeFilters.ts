@@ -59,6 +59,7 @@ export function filterChanges(
   text: string,
   extensions: readonly string[],
   includeDirectoryMatches: boolean,
+  statuses: readonly string[] = [],
 ) {
   const terms = text.trim().toLowerCase().split(/\s+/).filter(Boolean);
   const allExtensions = extensions.includes(ALL_FILE_TYPES);
@@ -66,6 +67,7 @@ export function filterChanges(
   const selectedExtensions = new Set(extensions);
 
   return changes.filter((change) => {
+    if (statuses.length && !statuses.includes(change.treeConflicted || change.properties === "conflicted" ? "C" : change.statusCode)) return false;
     if (!allExtensions && !selectedExtensions.has(extensionOf(change))) return false;
     if (!terms.length) return true;
     const candidate = includeDirectoryMatches

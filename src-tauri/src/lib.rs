@@ -1,4 +1,5 @@
 mod beyond_compare;
+mod client_update;
 mod models;
 mod path_scope;
 mod svn;
@@ -12,6 +13,31 @@ use models::{
     ToolAvailability, TortoiseSvnAvailability, WorkingCopyWatcherStatus,
 };
 use std::path::PathBuf;
+
+#[tauri::command]
+async fn check_client_update() -> Result<client_update::UpdateInfo, String> {
+    tauri::async_runtime::spawn_blocking(client_update::check)
+        .await
+        .map_err(|error| error.to_string())?
+}
+#[tauri::command]
+async fn download_client_update(app: tauri::AppHandle, version: String) -> Result<(), String> {
+    use tauri::Manager;
+    tauri::async_runtime::spawn_blocking(move || {
+        client_update::download(&app.state::<client_update::UpdateManager>(), &version)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+#[tauri::command]
+fn install_client_update(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, client_update::UpdateManager>,
+) -> Result<(), String> {
+    client_update::install(&state)?;
+    app.exit(0);
+    Ok(())
+}
 
 struct LaunchDirectory(Option<String>);
 
@@ -239,12 +265,16 @@ fn launch_directory() -> Option<String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .manage(client_update::UpdateManager::default())
         .manage(LaunchDirectory(launch_directory()))
         .manage(svn_update::SvnUpdateManager::default())
         .manage(working_copy_watcher::WorkingCopyWatcherManager::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
+            check_client_update,
+            download_client_update,
+            install_client_update,
             get_launch_directory,
             scan_changes,
             scan_changed_paths,

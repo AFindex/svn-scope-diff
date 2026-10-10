@@ -5,6 +5,13 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+function Get-UpdateFileHash([string]$Path) {
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    $inputStream = [IO.File]::OpenRead($Path)
+    try { return [BitConverter]::ToString($algorithm.ComputeHash($inputStream)).Replace('-', '') }
+    finally { $inputStream.Dispose(); $algorithm.Dispose() }
+}
+
 Set-StrictMode -Version Latest
 
 $projectRoot = [System.IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
@@ -89,6 +96,9 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
     [System.IO.Compression.CompressionLevel]::Optimal,
     $false
 )
+
+$archiveHash = (Get-UpdateFileHash $archive).ToLowerInvariant()
+@{ version = $version; sha256 = $archiveHash } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $portableRoot 'update.json') -Encoding ascii
 
 $stableUpdated = $false
 try {
