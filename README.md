@@ -115,14 +115,14 @@ npm run portable
 
 ```text
 dist-portable\
-├─ SVN Scope 0.4.0\
+├─ SVN Scope 0.4.1\
 │  ├─ SVN Scope.exe
 │  ├─ Register-ContextMenu.cmd
 │  ├─ Unregister-ContextMenu.cmd
 │  ├─ 对应 PowerShell 脚本
 │  ├─ README-便携版.txt
 │  └─ SHA256SUMS.txt
-└─ SVN-Scope-0.4.0-win-x64.zip
+└─ SVN-Scope-0.4.1-win-x64.zip
 ```
 
 首次构建会下载 npm/crates.io 依赖；之后是纯本机构建。产物不包含安装器或遥测；客户端更新会连接本仓库 GitHub Releases。
@@ -162,7 +162,7 @@ dist-portable\
 
 ## 客户端更新发布
 
-维护者推送与应用版本一致的 `v0.4.0` 等标签后，`.github/workflows/release.yml` 构建便携 ZIP 并发布 `update.json`。清单包含 `version` 和 ZIP 的 `sha256`；下载地址固定在本仓库对应标签，不接受任意外部安装地址。SHA-256 用于完整性校验，发布渠道依赖 GitHub HTTPS，不是独立的代码签名。
+维护者推送与应用版本一致的 `v0.4.1` 等标签后，`.github/workflows/release.yml` 构建便携 ZIP 并发布 `update.json`。清单包含 `version` 和 ZIP 的 `sha256`；下载地址固定在本仓库对应标签，不接受任意外部安装地址。SHA-256 用于完整性校验，发布渠道依赖 GitHub HTTPS，不是独立的代码签名。
 
 旧的 0.3.0 客户端没有更新入口，需手动安装一次含此功能的版本。尚未发布 Release 或清单时，客户端会显示发布源不可用；本 PR 不会自行发布正式版本。
 
@@ -173,3 +173,11 @@ dist-portable\
 已修复：切换目录时 Monaco 模型提前释放导致的编辑器异常、未版本化目录内部文件无法直接查询状态而从列表消失、扫描期间丢事件、失败后丢队列、并发扫描旧结果覆盖、Windows 短目录名与 SVN 返回长路径不一致、连续写入无限延迟，以及只改 SVN 元数据时漏刷新。系统监听错误会保留原始原因。仍可能遇到目录被删除/移动、文件权限不足、SVN 工作副本锁定/损坏或外部工具持续修改；这些情况需要恢复路径/权限、等待外部操作或用 SVN 检查工作副本，不自动执行 cleanup/revert。
 
 验证命令：`npm run test:frontend`、`npm run build`、`cargo test --manifest-path src-tauri/Cargo.toml`。本机测试使用临时 SVN 仓库，不操作实际项目。运行 `npm run dev` 后可打开 `http://localhost:1420/tests/preview.html` 验证前端交互；此页面使用模拟 IPC，不读写真实工作副本，也不能实际安装更新。
+
+## 历史目录快速打开
+
+首次成功扫描后，客户端会把该组目录的变更列表保存在本机应用缓存目录的 `scan-history` 下，最多保留最近 12 组。重启后再次打开同一历史目录，先显示上次列表及保存时间，再在后台核对完整 SVN 状态；同一窗口重复选择当前目录直接复用已打开列表，不重复扫描。
+
+历史列表不是最新状态的保证。后台核对期间可以浏览、筛选和查看 Diff；核对成功后替换为最新列表并恢复编辑。核对失败会保留历史列表、显示原因，点击“刷新变更”可重试。首次升级到包含此功能的版本仍需完成一次扫描；缓存缺失或损坏时正常扫描，不影响项目文件。
+
+缓存只保存路径和状态等扫描信息，不保存文件正文。界面验证可使用 `tests/preview.html?history=ok`（延迟 15 秒返回最新列表）或 `?history=fail`（模拟后台扫描失败）。

@@ -37,6 +37,7 @@ interface DiffPaneProps {
   onOpenConflictEditor: () => void;
   onMarkResolved: () => void;
   workspaceUpdating: boolean;
+  historyPreview: boolean;
   revertingSelectedDiff: boolean;
   onRevertSelectedDiff: (content: string, hunkCount: number) => void;
   propertyDiff?: string | null;
@@ -169,6 +170,7 @@ export function DiffPane({
   onOpenConflictEditor,
   onMarkResolved,
   workspaceUpdating,
+  historyPreview,
   revertingSelectedDiff,
   onRevertSelectedDiff,
   propertyDiff,
@@ -302,7 +304,7 @@ export function DiffPane({
   const revertSelectedHunks = () => {
     const editor = editorRef.current;
     const selection = diffSelectionRef.current;
-    if (!editor || !diff || !selection || diff.truncated || workspaceUpdating || revertingSelectedDiff) return;
+    if (!editor || !diff || !selection || diff.truncated || workspaceUpdating || historyPreview || revertingSelectedDiff) return;
     if (draftContent !== undefined) { window.alert("请先保存或撤销编辑，再还原 SVN 差异"); return; }
     const result = revertSelectedDiffChanges(
       diff.original,
@@ -320,7 +322,7 @@ export function DiffPane({
   actionRef.current = {
     revert: revertSelectedHunks,
     save: () => {
-      if (draftContent !== undefined && !workspaceUpdating && !revertingSelectedDiff && diff && !diff.truncated) onSaveContent(draftContent);
+      if (draftContent !== undefined && !workspaceUpdating && !historyPreview && !revertingSelectedDiff && diff && !diff.truncated) onSaveContent(draftContent);
     },
   };
 
@@ -790,7 +792,7 @@ export function DiffPane({
           )}
           {canSwitchView && <div className="editor-status" role="status">
             <span>{cursorText}</span><span>{draftContent !== undefined ? "未保存" : "已保存"}</span>
-            <button type="button" disabled={draftContent === undefined || workspaceUpdating || revertingSelectedDiff} onClick={() => actionRef.current.save()}>保存 Ctrl+S</button>
+            <button type="button" disabled={draftContent === undefined || workspaceUpdating || historyPreview || revertingSelectedDiff} onClick={() => actionRef.current.save()}>保存 Ctrl+S</button>
             <button type="button" disabled={draftContent === undefined || revertingSelectedDiff} onClick={() => { if (window.confirm("放弃当前未保存的编辑？")) onDraftChange(undefined); }}>放弃编辑</button>
           </div>}
           <div className={`diff-side-labels ${canSwitchView ? "with-overview" : ""}`}>
@@ -850,14 +852,14 @@ export function DiffPane({
                 keepCurrentModifiedModel
                 loading={<div className="diff-loading"><span className="spinner" /> 正在加载编辑器…</div>}
                 options={{
-                  readOnly: diff.truncated || workspaceUpdating || revertingSelectedDiff || selected.item === "deleted" || selected.item === "missing",
+                  readOnly: diff.truncated || workspaceUpdating || historyPreview || revertingSelectedDiff || selected.item === "deleted" || selected.item === "missing",
                   domReadOnly: false,
                   contextmenu: true,
                   renderLineHighlight: "all",
                   cursorStyle: "line",
                   cursorWidth: 2,
                   cursorBlinking: "blink",
-                  readOnlyMessage: { value: "当前文件只读（BASE、截断内容、已删除文件或正在执行 SVN 操作）" },
+                  readOnlyMessage: { value: historyPreview ? "正在核对历史列表，完成后可编辑" : "当前文件只读（BASE、截断内容、已删除文件或正在执行 SVN 操作）" },
                   originalEditable: false,
                   renderSideBySide: true,
                   useInlineViewWhenSpaceIsLimited: false,

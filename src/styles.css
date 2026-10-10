@@ -3348,3 +3348,5 @@ button:disabled {
 .client-update { position: relative; }
 .client-update-panel { position: absolute; z-index: 100; right: 0; top: 35px; width: 330px; background: white; padding: 14px; border: 1px solid var(--border); box-shadow: 0 5px 20px #0002; border-radius: 6px; font-size: 13px; }
 .client-update-panel p { overflow-wrap: anywhere; }
+
+.history-banner { color: #456085; background: #f0f5fc; }

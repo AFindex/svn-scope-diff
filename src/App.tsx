@@ -221,6 +221,7 @@ export default function App() {
   const [selected, setSelected] = useState<ChangeEntry>();
   const [diff, setDiff] = useState<DiffResult>();
   const [scanLoading, setScanLoading] = useState(false);
+  const [historySavedAt, setHistorySavedAt] = useState<number>();
   const [diffLoading, setDiffLoading] = useState(false);
   const [diffReverting, setDiffReverting] = useState(false);
   const [scanError, setScanError] = useState<string>();
@@ -386,13 +387,16 @@ export default function App() {
     directoryOrDirectories: string | string[],
     preserveSelection = false,
   ) => {
+    const directories = Array.isArray(directoryOrDirectories)
+      ? directoryOrDirectories
+      : [directoryOrDirectories];
+    if (!preserveSelection && scanRef.current && scopeSetKey(scanRef.current.scopeDirectories) === scopeSetKey(directories)) {
+      return scanRef.current;
+    }
     if (scanLoadingRef.current || writingFileRef.current) return undefined;
     if (!preserveSelection && !discardDraft()) return undefined;
     scanLoadingRef.current = true;
     scanGenerationRef.current += 1;
-    const directories = Array.isArray(directoryOrDirectories)
-      ? directoryOrDirectories
-      : [directoryOrDirectories];
     bulkDiffRunRef.current += 1;
     bulkDiffRunningRef.current = false;
     setBulkDiffProgress(undefined);
@@ -406,8 +410,31 @@ export default function App() {
     setScanLoading(true);
     setScanError(undefined);
     setToast(undefined);
+    let restoredHistory = false;
+    if (!preserveSelection) {
+      setHistorySavedAt(undefined);
+      scanRef.current = undefined;
+      setScan(undefined);
+      selectedRef.current = undefined;
+      setSelected(undefined);
+      setDiff(undefined);
+      setCommitSelection(new Set());
+    }
     try {
+      if (!preserveSelection) {
+        const history = await invoke<{ savedAt: number; scan: ScanResult } | null>("read_scan_history", { directories }).catch(() => null);
+        if (history) {
+          restoredHistory = true;
+          activeScanDirectoryRef.current = scopeSetKey(history.scan.scopeDirectories);
+          scanRef.current = history.scan;
+          setScan(history.scan);
+          setHistorySavedAt(history.savedAt);
+          selectedRef.current = history.scan.changes[0];
+          setSelected(history.scan.changes[0]);
+        }
+      }
       const result = await invoke<ScanResult>("scan_changes", { directories });
+      setHistorySavedAt(undefined);
       activeScanDirectoryRef.current = scopeSetKey(result.scopeDirectories);
       scanRef.current = result;
       setScan(result);
@@ -421,7 +448,7 @@ export default function App() {
         : reconcileCommitSelection(current, result.changes));
       setSelected((current) => {
         if (draftRef.current !== undefined && current) return current;
-        if (preserveSelection && current) {
+        if ((preserveSelection || restoredHistory) && current) {
           if (current.contextOnly) return current;
           const retained = result.changes.find((change) => change.path === current.path);
           if (retained) return retained;
@@ -435,7 +462,7 @@ export default function App() {
       return result;
     } catch (error) {
       setScanError(errorMessage(error));
-      if (!preserveSelection) {
+      if (!preserveSelection && !restoredHistory) {
         scanRef.current = undefined;
         setScan(undefined);
         setSelected(undefined);
@@ -951,6 +978,7 @@ export default function App() {
   }, [discardDraft, storeDiffCache]);
 
   const revertSelectedDiff = useCallback(async (content: string, hunkCount: number) => {
+    if (historySavedAt !== undefined) { setToast("历史列表尚未核对完成，请刷新后再修改文件"); return; }
     const actionLabel = hunkCount ? `还原 ${hunkCount} 处差异` : "保存文件";
     const current = scanRef.current;
     const change = selectedRef.current;
@@ -1022,7 +1050,7 @@ export default function App() {
       writingFileRef.current = false;
       setDiffReverting(false);
     }
-  }, [changeDraft, diff, diffReverting, refreshChangedPaths, storeDiffCache]);
+  }, [changeDraft, diff, diffReverting, historySavedAt, refreshChangedPaths, storeDiffCache]);
 
   const updateAllTextDiffs = useCallback(async () => {
     if (svnUpdate.running) {
@@ -1328,6 +1356,7 @@ export default function App() {
   }, []);
 
   const launchTortoiseCommit = useCallback(async (paths: string[]) => {
+    if (historySavedAt !== undefined) { setToast("历史列表尚未核对完成，请刷新后再提交"); return; }
     if (!scan || !paths.length || commitLaunching || writingFileRef.current) return;
     if (draftRef.current !== undefined) { setToast("请先保存编辑，再提交工作文件"); return; }
     if (svnUpdate.running) {
@@ -1350,7 +1379,7 @@ export default function App() {
     } finally {
       setCommitLaunching(false);
     }
-  }, [commitLaunching, scan, svnUpdate.running]);
+  }, [commitLaunching, historySavedAt, scan, svnUpdate.running]);
 
   const openTortoiseCommit = useCallback(async () => {
     await launchTortoiseCommit(commitChanges.map((change) => change.path));
@@ -1362,6 +1391,10 @@ export default function App() {
     targets: ChangeEntry[] = [change],
   ) => {
     if (!scan || writingFileRef.current) return;
+    if (historySavedAt !== undefined && ["commit", "revert", "resolve", "conflictEditor"].includes(action)) {
+      setToast("历史列表尚未核对完成，请刷新后再执行 SVN 写操作");
+      return;
+    }
     if (draftRef.current !== undefined && ["revert", "resolve", "conflictEditor"].includes(action)) { setToast("请先保存或放弃当前编辑，再执行 SVN 操作"); return; }
     const uniqueTargets = targets.filter((target, index) => (
       targets.findIndex(
@@ -1435,6 +1468,7 @@ export default function App() {
     }
   }, [
     launchTortoiseCommit,
+    historySavedAt,
     partialScanLoading,
     refreshChangedPaths,
     removeScanDirectory,
@@ -1713,6 +1747,10 @@ export default function App() {
           </div>
 
           <div className="content">
+            {historySavedAt !== undefined && <div className="scan-banner history-banner" role="status">
+              {scanLoading && <span className="spinner" />}
+              <span>已快速打开 {new Date(historySavedAt).toLocaleString()} 的历史列表；{scanLoading ? "正在后台核对最新变更，可先浏览，完成后可编辑。" : "最新状态尚未核对，请点击刷新变更重试。"}</span>
+            </div>}
             {scanError && <div className="scan-banner"><Icon name="warning" size={16} />{scanError}</div>}
             {autoRefreshError && <div className="scan-banner" role="alert">
               <span>自动刷新：{autoRefreshError}（失败路径每 3 秒重试）</span>
@@ -1744,6 +1782,7 @@ export default function App() {
                 if (selected) void handleItemAction("resolve", selected);
               }}
               workspaceUpdating={svnUpdate.running}
+              historyPreview={historySavedAt !== undefined}
               revertingSelectedDiff={diffReverting}
               onRevertSelectedDiff={(content, hunkCount) => {
                 void revertSelectedDiff(content, hunkCount);
