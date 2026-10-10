@@ -205,6 +205,12 @@ export function DiffPane({
   const modifiedSearchDecorationsRef = useRef<DecorationsCollection | null>(null);
 
   const handleEditorMount: DiffOnMount = (editor, monaco) => {
+    // Release models after the diff editor detaches them on unmount
+    const mountedModels = editor.getModel();
+    editor.onDidDispose(() => queueMicrotask(() => {
+      mountedModels?.original.dispose();
+      mountedModels?.modified.dispose();
+    }));
     contentListenerRef.current?.dispose();
     menuActionsRef.current.forEach((action) => action.dispose());
     menuActionsRef.current = [];
@@ -267,6 +273,7 @@ export function DiffPane({
     modifiedSelectionListenerRef.current = watchSelection("modified", editor.getModifiedEditor());
     diffUpdateListenerRef.current = editor.onDidUpdateDiff(() => {
       window.requestAnimationFrame(() => {
+        if (editorRef.current !== editor) return;
         applyCollapsedState(editor, viewModeRef.current);
         updateDiffCount();
       });
@@ -839,6 +846,8 @@ export function DiffPane({
                 language={languageForPath(diff.path)}
                 theme={monacoThemeForPalette(effectivePalette)}
                 onMount={handleEditorMount}
+                keepCurrentOriginalModel
+                keepCurrentModifiedModel
                 loading={<div className="diff-loading"><span className="spinner" /> 正在加载编辑器…</div>}
                 options={{
                   readOnly: diff.truncated || workspaceUpdating || revertingSelectedDiff || selected.item === "deleted" || selected.item === "missing",
