@@ -3,7 +3,7 @@ use crate::path_scope::{validate_scope, validate_target};
 use encoding_rs::{GBK, UTF_16BE, UTF_16LE};
 use quick_xml::de::from_str;
 use serde::Deserialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -210,8 +210,9 @@ pub fn scan_changed_paths(
     }
 
     let mut targets = Vec::new();
+    let mut versioned_parents = HashMap::new();
     for path in paths {
-        let target = absolute_path(path, "局部刷新路径")?;
+        let mut target = absolute_path(path, "局部刷新路径")?;
         if !path_is_within(&target, &wc_root)
             || !scopes.iter().any(|scope| path_is_within(&target, scope))
         {
@@ -219,6 +220,20 @@ pub fn scan_changed_paths(
                 "拒绝刷新当前扫描范围之外的路径：{}",
                 target.display()
             ));
+        }
+        // SVN cannot report a child beneath an unversioned directory directly
+        // Refresh the unversioned root so its descendants stay visible
+        while let Some(parent) = target.parent() {
+            if !scopes.iter().any(|scope| path_is_within(parent, scope)) {
+                break;
+            }
+            let is_versioned = *versioned_parents
+                .entry(path_key(parent))
+                .or_insert_with(|| svn_info(parent).is_ok());
+            if is_versioned {
+                break;
+            }
+            target = parent.to_path_buf();
         }
         if !targets
             .iter()
@@ -534,6 +549,13 @@ fn parse_status_target(
 
     for target in document.targets {
         let target_path = PathBuf::from(target.path);
+        // SVN expands Windows short directory names in unversioned status output
+        // Map an identical filesystem target back to the requested spelling
+        let same_target_alias = target_path != selected
+            && fs::canonicalize(&target_path)
+                .ok()
+                .zip(fs::canonicalize(selected).ok())
+                .is_some_and(|(actual, requested)| actual == requested);
         for entry in target.entries {
             if !is_interesting(&entry.status) {
                 continue;
@@ -541,13 +563,18 @@ fn parse_status_target(
             let status = entry.status;
 
             let raw_path = PathBuf::from(&entry.path);
-            let absolute = if raw_path.is_absolute() {
+            let mut absolute = if raw_path.is_absolute() {
                 raw_path
             } else if target_path.is_absolute() {
                 target_path.join(raw_path)
             } else {
                 selected.join(raw_path)
             };
+            if same_target_alias {
+                if let Ok(relative) = absolute.strip_prefix(&target_path) {
+                    absolute = selected.join(relative);
+                }
+            }
             if !path_is_within(&absolute, selected) {
                 continue;
             }
@@ -1314,6 +1341,30 @@ mod tests {
         .unwrap();
         assert!(vanished_patch.changes.is_empty());
 
+        let unversioned_root = selected.join("new-folder");
+        let unversioned_file = unversioned_root.join("nested").join("added.cs");
+        fs::create_dir_all(unversioned_file.parent().unwrap()).unwrap();
+        fs::write(&unversioned_file, "class Added {}\r\n").unwrap();
+        let unversioned_patch = scan_changed_paths(
+            &[path_string(&selected)],
+            &[path_string(&unversioned_file)],
+            selected.to_str().unwrap(),
+            working_copy.to_str().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            unversioned_patch.roots,
+            vec![path_string(&unversioned_root)]
+        );
+        assert!(
+            unversioned_patch
+                .changes
+                .iter()
+                .any(|change| change.relative_path == "new-folder/nested/added.cs"),
+            "{:#?}",
+            unversioned_patch.changes
+        );
+
         let outside = scan_changed_paths(
             &[selected.to_string_lossy().into_owned()],
             &[working_copy
@@ -1334,6 +1385,45 @@ mod tests {
         )
         .unwrap();
         assert!(clean_patch.changes.is_empty());
+    }
+
+    #[test]
+    fn saving_text_preserves_encoding_and_rejects_external_edits() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().to_str().unwrap();
+        let path = temporary.path().join("editable.txt");
+        for encoding in ["UTF-8", "UTF-8 BOM", "UTF-16 LE", "UTF-16 BE", "GBK"] {
+            let initial = encode_text("原文\r\n", encoding).unwrap();
+            fs::write(&path, &initial).unwrap();
+            save_working_file_content(
+                path.to_str().unwrap(),
+                "原文\r\n",
+                "修改\r\n",
+                encoding,
+                root,
+                &[root.to_owned()],
+                root,
+            )
+            .unwrap();
+            assert_eq!(
+                fs::read(&path).unwrap(),
+                encode_text("修改\r\n", encoding).unwrap()
+            );
+            let failure = save_working_file_content(
+                path.to_str().unwrap(),
+                "过期内容",
+                "覆盖",
+                encoding,
+                root,
+                &[root.to_owned()],
+                root,
+            );
+            assert!(failure.is_err());
+            assert_eq!(
+                fs::read(&path).unwrap(),
+                encode_text("修改\r\n", encoding).unwrap()
+            );
+        }
     }
 
     fn run_checked(command: &mut Command) {

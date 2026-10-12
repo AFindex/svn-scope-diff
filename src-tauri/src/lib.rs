@@ -1,6 +1,8 @@
 mod beyond_compare;
+mod client_update;
 mod models;
 mod path_scope;
+mod scan_history;
 mod svn;
 mod svn_update;
 mod system_shell;
@@ -13,6 +15,31 @@ use models::{
 };
 use std::path::PathBuf;
 
+#[tauri::command]
+async fn check_client_update() -> Result<client_update::UpdateInfo, String> {
+    tauri::async_runtime::spawn_blocking(client_update::check)
+        .await
+        .map_err(|error| error.to_string())?
+}
+#[tauri::command]
+async fn download_client_update(app: tauri::AppHandle, version: String) -> Result<(), String> {
+    use tauri::Manager;
+    tauri::async_runtime::spawn_blocking(move || {
+        client_update::download(&app.state::<client_update::UpdateManager>(), &version)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+#[tauri::command]
+fn install_client_update(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, client_update::UpdateManager>,
+) -> Result<(), String> {
+    client_update::install(&state)?;
+    app.exit(0);
+    Ok(())
+}
+
 struct LaunchDirectory(Option<String>);
 
 #[tauri::command]
@@ -21,10 +48,39 @@ fn get_launch_directory(state: tauri::State<'_, LaunchDirectory>) -> Option<Stri
 }
 
 #[tauri::command]
-async fn scan_changes(directories: Vec<String>) -> Result<ScanResult, String> {
-    tauri::async_runtime::spawn_blocking(move || svn::scan_scopes(&directories))
+async fn scan_changes(
+    app: tauri::AppHandle,
+    directories: Vec<String>,
+) -> Result<ScanResult, String> {
+    use tauri::Manager;
+    let cache_directory = app
+        .path()
+        .app_cache_dir()
+        .ok()
+        .map(|path| path.join("scan-history"));
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = svn::scan_scopes(&directories)?;
+        if let Some(directory) = cache_directory {
+            // 缓存不可写时仍正常返回扫描结果
+            let _ = scan_history::write(&directory, &directories, &result);
+        }
+        Ok(result)
+    })
+    .await
+    .map_err(|error| format!("扫描任务异常结束：{error}"))?
+}
+
+#[tauri::command]
+async fn read_scan_history(
+    app: tauri::AppHandle,
+    directories: Vec<String>,
+) -> Option<scan_history::ScanHistory> {
+    use tauri::Manager;
+    let directory = app.path().app_cache_dir().ok()?.join("scan-history");
+    tauri::async_runtime::spawn_blocking(move || scan_history::read(&directory, &directories))
         .await
-        .map_err(|error| format!("扫描任务异常结束：{error}"))?
+        .ok()
+        .flatten()
 }
 
 #[tauri::command]
@@ -239,14 +295,19 @@ fn launch_directory() -> Option<String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .manage(client_update::UpdateManager::default())
         .manage(LaunchDirectory(launch_directory()))
         .manage(svn_update::SvnUpdateManager::default())
         .manage(working_copy_watcher::WorkingCopyWatcherManager::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
+            check_client_update,
+            download_client_update,
+            install_client_update,
             get_launch_directory,
             scan_changes,
+            read_scan_history,
             scan_changed_paths,
             get_beyond_compare_availability,
             get_tortoise_svn_availability,

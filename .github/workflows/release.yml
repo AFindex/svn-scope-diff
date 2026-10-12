@@ -1,0 +1,30 @@
+name: Portable release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - run: npm ci
+      - run: npm run test:frontend
+      - run: cargo test --manifest-path src-tauri/Cargo.toml
+      - name: Validate release version
+        shell: pwsh
+        run: |
+          $version = (Get-Content src-tauri/tauri.conf.json | ConvertFrom-Json).version
+          if ($env:GITHUB_REF_NAME -ne "v$version") { throw "Tag and app version differ" }
+      - run: npm run portable
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist-portable/SVN-Scope-*-win-x64.zip
+            dist-portable/update.json

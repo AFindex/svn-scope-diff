@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Permissions required by the SVN Scope main window",
   "windows": ["main"],
-  "permissions": ["core:default", "dialog:allow-open"]
+  "permissions": ["core:default", "core:window:allow-destroy", "dialog:allow-open"]
 }

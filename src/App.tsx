@@ -10,6 +10,9 @@ import {
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { readRecentDirectories, rememberDirectories, saveRecentDirectories } from "./recentDirectories";
+import { ClientUpdate } from "./components/ClientUpdate";
 import { open } from "@tauri-apps/plugin-dialog";
 import type {
   ChangeEntry,
@@ -194,10 +197,31 @@ function getFileDiff(change: ChangeEntry) {
 }
 
 export default function App() {
+  const [recentDirectories, setRecentDirectories] = useState(readRecentDirectories);
+  const [draftContent, setDraftContent] = useState<string>();
+  const draftRef = useRef<string | undefined>(undefined);
+  const changeDraft = useCallback((content: string | undefined) => {
+    draftRef.current = content;
+    setDraftContent(content);
+  }, []);
+  const discardDraft = useCallback(() => {
+    if (draftRef.current !== undefined && !window.confirm("当前文件有未保存的编辑，确定放弃吗？")) return false;
+    changeDraft(undefined);
+    return true;
+  }, [changeDraft]);
+  useEffect(() => {
+    let stop: (() => void) | undefined;
+    let active = true;
+    void getCurrentWindow().onCloseRequested((event) => {
+      if (!discardDraft()) event.preventDefault();
+    }).then((unlisten) => { if (active) stop = unlisten; else unlisten(); });
+    return () => { active = false; stop?.(); };
+  }, [discardDraft]);
   const [scan, setScan] = useState<ScanResult>();
   const [selected, setSelected] = useState<ChangeEntry>();
   const [diff, setDiff] = useState<DiffResult>();
   const [scanLoading, setScanLoading] = useState(false);
+  const [historySavedAt, setHistorySavedAt] = useState<number>();
   const [diffLoading, setDiffLoading] = useState(false);
   const [diffReverting, setDiffReverting] = useState(false);
   const [scanError, setScanError] = useState<string>();
@@ -217,6 +241,7 @@ export default function App() {
   const [svnUpdate, setSvnUpdate] = useState<SvnUpdateStatus>(idleSvnUpdateStatus);
   const [svnUpdateLaunching, setSvnUpdateLaunching] = useState(false);
   const [watcherStatus, setWatcherStatus] = useState<WorkingCopyWatcherStatus>();
+  const [watcherRestartCount, setWatcherRestartCount] = useState(0);
   const [autoRefreshBusy, setAutoRefreshBusy] = useState(false);
   const [autoRefreshError, setAutoRefreshError] = useState<string>();
   const [partialScanLoading, setPartialScanLoading] = useState(false);
@@ -235,6 +260,9 @@ export default function App() {
   const finishedTortoiseOperationIdsRef = useRef(new Set<number>());
   const watcherIdRef = useRef<number | null>(null);
   const scanLoadingRef = useRef(false);
+  const writingFileRef = useRef(false);
+  const scanGenerationRef = useRef(0);
+  const partialRefreshTailRef = useRef<Promise<void>>(Promise.resolve());
   const svnUpdateRunningRef = useRef(false);
   const pendingAutoRefreshPathsRef = useRef(new Map<string, string>());
   const autoRefreshRunningRef = useRef(false);
@@ -362,11 +390,19 @@ export default function App() {
     const directories = Array.isArray(directoryOrDirectories)
       ? directoryOrDirectories
       : [directoryOrDirectories];
+    if (!preserveSelection && scanRef.current && scopeSetKey(scanRef.current.scopeDirectories) === scopeSetKey(directories)) {
+      return scanRef.current;
+    }
+    if (scanLoadingRef.current || writingFileRef.current) return undefined;
+    if (!preserveSelection && !discardDraft()) return undefined;
+    scanLoadingRef.current = true;
+    scanGenerationRef.current += 1;
     bulkDiffRunRef.current += 1;
     bulkDiffRunningRef.current = false;
     setBulkDiffProgress(undefined);
     const nextDirectory = scopeSetKey(directories);
     const directoryChanged = activeScanDirectoryRef.current !== nextDirectory;
+    if (directoryChanged && preserveSelection && !discardDraft()) { scanLoadingRef.current = false; return undefined; }
     if (directoryChanged) {
       diffCacheRef.current.clear();
       diffCacheRef.current.setLimit(DIFF_CACHE_LIMIT);
@@ -374,29 +410,59 @@ export default function App() {
     setScanLoading(true);
     setScanError(undefined);
     setToast(undefined);
+    let restoredHistory = false;
+    if (!preserveSelection) {
+      setHistorySavedAt(undefined);
+      scanRef.current = undefined;
+      setScan(undefined);
+      selectedRef.current = undefined;
+      setSelected(undefined);
+      setDiff(undefined);
+      setCommitSelection(new Set());
+    }
     try {
+      if (!preserveSelection) {
+        const history = await invoke<{ savedAt: number; scan: ScanResult } | null>("read_scan_history", { directories }).catch(() => null);
+        if (history) {
+          restoredHistory = true;
+          activeScanDirectoryRef.current = scopeSetKey(history.scan.scopeDirectories);
+          scanRef.current = history.scan;
+          setScan(history.scan);
+          setHistorySavedAt(history.savedAt);
+          selectedRef.current = history.scan.changes[0];
+          setSelected(history.scan.changes[0]);
+        }
+      }
       const result = await invoke<ScanResult>("scan_changes", { directories });
+      setHistorySavedAt(undefined);
       activeScanDirectoryRef.current = scopeSetKey(result.scopeDirectories);
       scanRef.current = result;
       setScan(result);
+      setRecentDirectories((history) => {
+        const next = rememberDirectories(history, result.scopeDirectories);
+        saveRecentDirectories(next);
+        return next;
+      });
       setCommitSelection((current) => directoryChanged
         ? new Set()
         : reconcileCommitSelection(current, result.changes));
       setSelected((current) => {
-        if (preserveSelection && current) {
+        if (draftRef.current !== undefined && current) return current;
+        if ((preserveSelection || restoredHistory) && current) {
+          if (current.contextOnly) return current;
           const retained = result.changes.find((change) => change.path === current.path);
           if (retained) return retained;
         }
         return result.changes[0];
       });
-      if (!result.changes.length) {
+      if (!result.changes.length && draftRef.current === undefined) {
         setDiff(undefined);
         setDiffError(undefined);
       }
       return result;
     } catch (error) {
       setScanError(errorMessage(error));
-      if (!preserveSelection) {
+      if (!preserveSelection && !restoredHistory) {
         scanRef.current = undefined;
         setScan(undefined);
         setSelected(undefined);
@@ -405,9 +471,10 @@ export default function App() {
       }
       return undefined;
     } finally {
+      scanLoadingRef.current = false;
       setScanLoading(false);
     }
-  }, []);
+  }, [discardDraft]);
 
   const applyScanPatch = useCallback((patch: ScanPatch) => {
     const current = scanRef.current;
@@ -420,7 +487,9 @@ export default function App() {
     setCommitSelection((selection) => reconcileCommitSelection(selection, changes));
 
     const currentSelected = selectedRef.current;
-    const nextSelected = currentSelected
+    const nextSelected = currentSelected && (currentSelected.contextOnly || draftRef.current !== undefined)
+      ? currentSelected
+      : currentSelected
       ? changes.find((change) => normalizedPath(change.path) === normalizedPath(currentSelected.path))
         ?? changes[0]
       : changes[0];
@@ -444,6 +513,12 @@ export default function App() {
   const refreshChangedPaths = useCallback(async (paths: string[], announce: boolean) => {
     const current = scanRef.current;
     if (!current || !paths.length || svnUpdateRunningRef.current) return undefined;
+    const generation = scanGenerationRef.current;
+    const previous = partialRefreshTailRef.current;
+    let release!: () => void;
+    partialRefreshTailRef.current = new Promise<void>((resolve) => { release = resolve; });
+    await previous;
+    if (generation !== scanGenerationRef.current || scanLoadingRef.current || svnUpdateRunningRef.current) { release(); return undefined; }
     if (announce) setPartialScanLoading(true);
     try {
       const patch = await invoke<ScanPatch>("scan_changed_paths", {
@@ -453,10 +528,12 @@ export default function App() {
         wcRoot: current.wcRoot,
       });
       const latest = scanRef.current;
-      if (!latest || scopeSetKey(latest.scopeDirectories) !== scopeSetKey(current.scopeDirectories)) {
+      if (generation !== scanGenerationRef.current || !latest || scopeSetKey(latest.scopeDirectories) !== scopeSetKey(current.scopeDirectories)) {
         return undefined;
       }
+      if (scanLoadingRef.current) return undefined;
       const updated = applyScanPatch(patch);
+      setAutoRefreshError(undefined);
       if (announce && updated) {
         setToast(`局部刷新完成：当前共 ${updated.changes.length} 项变更`);
       }
@@ -468,6 +545,7 @@ export default function App() {
       return undefined;
     } finally {
       if (announce) setPartialScanLoading(false);
+      release();
     }
   }, [applyScanPatch]);
 
@@ -483,13 +561,28 @@ export default function App() {
       ) {
         const paths = [...pendingAutoRefreshPathsRef.current.values()];
         pendingAutoRefreshPathsRef.current.clear();
-        await refreshChangedPaths(paths, false);
+        const updated = await refreshChangedPaths(paths, false);
+        if (!updated) {
+          for (const path of paths) {
+            if (scanRef.current?.scopeDirectories.some((scope) => pathIsWithin(path, scope))) {
+              pendingAutoRefreshPathsRef.current.set(normalizedPath(path), path);
+            }
+          }
+          break;
+        }
       }
     } finally {
       autoRefreshRunningRef.current = false;
       setAutoRefreshBusy(false);
     }
   }, [refreshChangedPaths]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      if (pendingAutoRefreshPathsRef.current.size) void flushAutoRefreshQueue();
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [flushAutoRefreshQueue]);
 
   useEffect(() => {
     let active = true;
@@ -501,7 +594,6 @@ export default function App() {
         listen<WorkingCopyChanged>("working-copy-changed", (event) => {
           if (
             event.payload.watcherId !== watcherIdRef.current
-            || scanLoadingRef.current
             || svnUpdateRunningRef.current
           ) return;
           for (const path of event.payload.paths) {
@@ -599,7 +691,7 @@ export default function App() {
       if (active) setAutoRefreshError(errorMessage(error));
     });
     return () => { active = false; };
-  }, [activeScopeKey, scan?.wcRoot, svnUpdate.running]);
+  }, [activeScopeKey, scan?.wcRoot, svnUpdate.running, watcherRestartCount]);
 
   useEffect(() => () => {
     void invoke("stop_working_copy_watcher").catch(() => undefined);
@@ -798,7 +890,7 @@ export default function App() {
       } catch {
         return;
       }
-      if (!active || selectedRef.current?.path !== path) return;
+      if (!active || writingFileRef.current || selectedRef.current?.path !== path) return;
 
       const pending = pendingFileUpdateRef.current;
       if (pending?.path === path) {
@@ -836,6 +928,7 @@ export default function App() {
   }, []);
 
   const reloadUpdatedFile = useCallback(async () => {
+    if (!discardDraft()) return;
     const update = pendingFileUpdateRef.current;
     const change = selectedRef.current;
     if (!update || !change || update.path !== change.path) {
@@ -882,9 +975,11 @@ export default function App() {
     } finally {
       setFileReloading(false);
     }
-  }, [storeDiffCache]);
+  }, [discardDraft, storeDiffCache]);
 
   const revertSelectedDiff = useCallback(async (content: string, hunkCount: number) => {
+    if (historySavedAt !== undefined) { setToast("历史列表尚未核对完成，请刷新后再修改文件"); return; }
+    const actionLabel = hunkCount ? `还原 ${hunkCount} 处差异` : "保存文件";
     const current = scanRef.current;
     const change = selectedRef.current;
     const currentDiff = diff;
@@ -896,10 +991,11 @@ export default function App() {
       || currentDiff.isBinary
       || currentDiff.isDirectory
       || currentDiff.truncated
-      || diffReverting
+      || writingFileRef.current
       || svnUpdateRunningRef.current
     ) return;
 
+    writingFileRef.current = true;
     setDiffReverting(true);
     setToast(undefined);
     try {
@@ -918,6 +1014,9 @@ export default function App() {
         watchBaselineRef.current = { path: change.path, fingerprint: savedFingerprint };
       }
 
+      setDiff({ ...currentDiff, modified: content });
+      changeDraft(undefined);
+      diffCacheRef.current.clear();
       pendingFileUpdateRef.current = undefined;
       setPendingFileUpdate(undefined);
       const updated = await refreshChangedPaths([change.path], false);
@@ -925,11 +1024,11 @@ export default function App() {
         (candidate) => normalizedPath(candidate.path) === normalizedPath(change.path),
       );
       if (!updated) {
-        setToast(`已还原 ${hunkCount} 处差异，但状态刷新失败；请手动刷新当前目录。`);
+        setToast(`已${actionLabel}，但状态刷新失败；请手动刷新当前目录。`);
         return;
       }
       if (!refreshedChange) {
-        setToast(`已还原 ${hunkCount} 处差异；文件已回到干净状态。`);
+        setToast(`已${actionLabel}；文件已回到干净状态。`);
         return;
       }
 
@@ -944,13 +1043,14 @@ export default function App() {
         setDiff(result);
         setPropertyDiffState(undefined);
       }
-      setToast(`已将选中的 ${hunkCount} 处差异还原为 SVN BASE。`);
+      setToast(`已${actionLabel}。`);
     } catch (error) {
       setToast(errorMessage(error));
     } finally {
+      writingFileRef.current = false;
       setDiffReverting(false);
     }
-  }, [diff, diffReverting, refreshChangedPaths, storeDiffCache]);
+  }, [changeDraft, diff, diffReverting, historySavedAt, refreshChangedPaths, storeDiffCache]);
 
   const updateAllTextDiffs = useCallback(async () => {
     if (svnUpdate.running) {
@@ -1121,7 +1221,8 @@ export default function App() {
   }, [propertyDiffState, selected]);
 
   const startSvnUpdate = useCallback(async () => {
-    if (!scan || scanLoading || svnUpdate.running || svnUpdateLaunching) return;
+    if (!scan || scanLoading || writingFileRef.current || svnUpdate.running || svnUpdateLaunching) return;
+    if (!discardDraft()) return;
     setSvnUpdateLaunching(true);
     setToast(undefined);
     bulkDiffRunRef.current += 1;
@@ -1146,7 +1247,7 @@ export default function App() {
     } finally {
       setSvnUpdateLaunching(false);
     }
-  }, [scan, scanLoading, svnUpdate.running, svnUpdateLaunching]);
+  }, [discardDraft, scan, scanLoading, svnUpdate.running, svnUpdateLaunching]);
 
   const cancelSvnUpdate = useCallback(async () => {
     if (!svnUpdate.running || svnUpdate.updateId === null || svnUpdate.cancelRequested) return;
@@ -1255,7 +1356,9 @@ export default function App() {
   }, []);
 
   const launchTortoiseCommit = useCallback(async (paths: string[]) => {
-    if (!scan || !paths.length || commitLaunching) return;
+    if (historySavedAt !== undefined) { setToast("历史列表尚未核对完成，请刷新后再提交"); return; }
+    if (!scan || !paths.length || commitLaunching || writingFileRef.current) return;
+    if (draftRef.current !== undefined) { setToast("请先保存编辑，再提交工作文件"); return; }
     if (svnUpdate.running) {
       setToast("SVN Update 进行中，请结束后再打开提交窗口");
       return;
@@ -1276,7 +1379,7 @@ export default function App() {
     } finally {
       setCommitLaunching(false);
     }
-  }, [commitLaunching, scan, svnUpdate.running]);
+  }, [commitLaunching, historySavedAt, scan, svnUpdate.running]);
 
   const openTortoiseCommit = useCallback(async () => {
     await launchTortoiseCommit(commitChanges.map((change) => change.path));
@@ -1287,7 +1390,12 @@ export default function App() {
     change: ChangeEntry,
     targets: ChangeEntry[] = [change],
   ) => {
-    if (!scan) return;
+    if (!scan || writingFileRef.current) return;
+    if (historySavedAt !== undefined && ["commit", "revert", "resolve", "conflictEditor"].includes(action)) {
+      setToast("历史列表尚未核对完成，请刷新后再执行 SVN 写操作");
+      return;
+    }
+    if (draftRef.current !== undefined && ["revert", "resolve", "conflictEditor"].includes(action)) { setToast("请先保存或放弃当前编辑，再执行 SVN 操作"); return; }
     const uniqueTargets = targets.filter((target, index) => (
       targets.findIndex(
         (candidate) => normalizedPath(candidate.path) === normalizedPath(target.path),
@@ -1360,6 +1468,7 @@ export default function App() {
     }
   }, [
     launchTortoiseCommit,
+    historySavedAt,
     partialScanLoading,
     refreshChangedPaths,
     removeScanDirectory,
@@ -1427,6 +1536,11 @@ export default function App() {
           )}
         </div>
         <div className="top-actions">
+          <ClientUpdate disabled={draftContent !== undefined || diffReverting || svnUpdate.running || scanLoading} />
+          <select aria-label="最近打开的文件夹" className="recent-directories" value="" disabled={scanLoading || svnUpdate.running || diffReverting} onChange={(event) => { if (event.target.value) void scanDirectory(event.target.value); }}>
+            <option value="">最近目录</option>
+            {recentDirectories.map((path) => <option key={path} value={path}>{path}</option>)}
+          </select>
           <button
             type="button"
             className="toolbar-button"
@@ -1496,6 +1610,7 @@ export default function App() {
                 <span>{scanError}</span>
               </div>
             )}
+            {recentDirectories.length > 0 && <div className="recent-folder-list"><strong>最近打开</strong>{recentDirectories.map((path) => <button type="button" key={path} title={path} disabled={scanLoading} onClick={() => void scanDirectory(path)}>{path}</button>)}</div>}
             <div className="welcome-hint">快捷键 Ctrl+O 打开目录 · Ctrl+R 刷新</div>
           </div>
         </section>
@@ -1600,7 +1715,7 @@ export default function App() {
               workspaceUpdating={svnUpdate.running}
               textDiffCount={eligibleTextChanges.length}
               bulkDiffProgress={bulkDiffProgress}
-              onSelect={setSelected}
+              onSelect={(change) => { if (!diffReverting && (change.path === selected?.path || discardDraft())) setSelected(change); }}
               onToggleCommitSelection={toggleCommitSelection}
               onClearCommitSelection={clearCommitSelection}
               onCommitSelection={() => void openTortoiseCommit()}
@@ -1632,8 +1747,26 @@ export default function App() {
           </div>
 
           <div className="content">
+            {historySavedAt !== undefined && <div className="scan-banner history-banner" role="status">
+              {scanLoading && <span className="spinner" />}
+              <span>已快速打开 {new Date(historySavedAt).toLocaleString()} 的历史列表；{scanLoading ? "正在后台核对最新变更，可先浏览，完成后可编辑。" : "最新状态尚未核对，请点击刷新变更重试。"}</span>
+            </div>}
             {scanError && <div className="scan-banner"><Icon name="warning" size={16} />{scanError}</div>}
+            {autoRefreshError && <div className="scan-banner" role="alert">
+              <span>自动刷新：{autoRefreshError}（失败路径每 3 秒重试）</span>
+              <button type="button" disabled={scanLoading || svnUpdate.running} onClick={() => {
+                void invoke("stop_working_copy_watcher").then(() => {
+                  setWatcherRestartCount((count) => count + 1);
+                  void refresh();
+                }).catch((error) => setAutoRefreshError(errorMessage(error)));
+              }}>重新监听并刷新</button>
+            </div>}
             <DiffPane
+              directoryChanges={selected?.isDirectory ? scan.changes.filter((change) => change.path !== selected.path && pathIsWithin(change.path, selected.path)) : []}
+              onSelectFile={(change) => { if (discardDraft()) setSelected(change); }}
+              draftContent={draftContent}
+              onDraftChange={changeDraft}
+              onSaveContent={(content) => { void revertSelectedDiff(content, 0); }}
               selected={selected}
               diff={diff}
               loading={diffLoading}
@@ -1649,6 +1782,7 @@ export default function App() {
                 if (selected) void handleItemAction("resolve", selected);
               }}
               workspaceUpdating={svnUpdate.running}
+              historyPreview={historySavedAt !== undefined}
               revertingSelectedDiff={diffReverting}
               onRevertSelectedDiff={(content, hunkCount) => {
                 void revertSelectedDiff(content, hunkCount);

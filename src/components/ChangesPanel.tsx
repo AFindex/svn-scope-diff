@@ -22,6 +22,7 @@ import type { ChangeEntry, TortoiseSvnAvailability } from "../types";
 import { ChangeList, type ChangeListSortKey, type SortDirection } from "./ChangeList";
 import { ChangeContextMenu } from "./ChangeContextMenu";
 import { ChangeTree } from "./ChangeTree";
+import { StatusFilterSelect } from "./StatusFilterSelect";
 import { ExtensionFilterSelect } from "./ExtensionFilterSelect";
 import { Icon } from "./Icons";
 
@@ -106,6 +107,7 @@ export function ChangesPanel({
   const [changeView, setChangeView] = useState<"tree" | "list">("tree");
   const [listSortKey, setListSortKey] = useState<ChangeListSortKey>("path");
   const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
+  const [statusFilters, setStatusFilters] = useState<string[]>([]);
   const [filterText, setFilterText] = useState("");
   const [extensionFilters, setExtensionFilters] = useState<string[]>([ALL_FILE_TYPES]);
   const [includeDirectoryMatches, setIncludeDirectoryMatches] = useState(false);
@@ -123,8 +125,8 @@ export function ChangesPanel({
   const counts = useMemo(() => statusCounts(changes), [changes]);
   const typeOptions = useMemo(() => fileTypeOptions(changes), [changes]);
   const filteredChanges = useMemo(
-    () => filterChanges(changes, filterText, extensionFilters, includeDirectoryMatches),
-    [changes, extensionFilters, filterText, includeDirectoryMatches],
+    () => filterChanges(changes, filterText, extensionFilters, includeDirectoryMatches, statusFilters),
+    [changes, extensionFilters, filterText, includeDirectoryMatches, statusFilters],
   );
   const visibleChanges = filteredChanges;
   const visibleCommitChanges = useMemo(
@@ -234,7 +236,7 @@ export function ChangesPanel({
     ? "请至少选择一种文件后缀"
     : filterText.trim()
       ? `没有匹配“${filterText.trim()}”和所选后缀的变更`
-      : "没有匹配所选后缀的变更";
+      : "没有匹配所选状态和后缀的变更";
 
   return (
     <div className="changes-panel">
@@ -331,6 +333,11 @@ export function ChangesPanel({
           </span>
         </div>
 
+        <StatusFilterSelect
+          changes={changes}
+          selectedValues={statusFilters}
+          onChange={setStatusFilters}
+        />
         <div className="combined-filter-fields">
           <SearchField
             value={filterText}

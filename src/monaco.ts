@@ -5,6 +5,8 @@ import editorWorker from "monaco-editor/editor/editor.worker?worker";
 import jsonWorker from "monaco-editor/language/json/json.worker?worker";
 
 import "monaco-editor/language/json/monaco.contribution";
+import "monaco-editor/features/contextmenu/register";
+import "monaco-editor/features/clipboard/register";
 import "monaco-editor/languages/definitions/bat/register";
 import "monaco-editor/languages/definitions/cpp/register";
 import "monaco-editor/languages/definitions/css/register";
@@ -64,8 +66,10 @@ function defineDiffTheme(
     "editorGutter.background": "#F8F9FB",
     "editorLineNumber.foreground": "#A8ADB7",
     "editorLineNumber.activeForeground": "#555C68",
-    "editor.selectionBackground": "#6E94F05C",
-    "editor.inactiveSelectionBackground": "#7798DF3D",
+    "editorCursor.foreground": "#203F9B",
+    "editor.lineHighlightBorder": "#91AAE860",
+    "editor.selectionBackground": "#6E94F099",
+    "editor.inactiveSelectionBackground": "#7798DF66",
     "editor.selectionHighlightBackground": "#91AAE82E",
     "diffEditor.insertedTextBackground": colors.insertedText,
     "diffEditor.removedTextBackground": colors.removedText,

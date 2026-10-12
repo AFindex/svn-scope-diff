@@ -80,3 +80,15 @@ test("directory-path matches are opt-in", () => {
     changes.slice(0, 2),
   );
 });
+
+test("status filters compose with text and extensions, including property and tree conflicts", () => {
+  const modified = change("src/Player.cs");
+  const added = { ...change("src/New.cs"), statusCode: "A", item: "added" };
+  const conflict = { ...change("src/Conflict.cs"), treeConflicted: true };
+  const propertyConflict = { ...change("props.asset"), properties: "conflicted" };
+  const changes = [modified, added, conflict, propertyConflict];
+  assert.deepEqual(filterChanges(changes, "", [ALL_FILE_TYPES], false, ["A", "C"]), [added, conflict, propertyConflict]);
+  assert.deepEqual(filterChanges(changes, "Player", ["cs"], false, ["M"]), [modified]);
+  assert.deepEqual(filterChanges(changes, "", ["cs"], false, ["C"]), [conflict]);
+  assert.deepEqual(filterChanges(changes, "", [ALL_FILE_TYPES], false, []), changes);
+});

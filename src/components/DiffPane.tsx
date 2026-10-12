@@ -21,6 +21,11 @@ import type { ChangeEntry, DiffResult } from "../types";
 import { Icon } from "./Icons";
 
 interface DiffPaneProps {
+  directoryChanges: ChangeEntry[];
+  onSelectFile: (change: ChangeEntry) => void;
+  draftContent?: string;
+  onDraftChange: (content: string | undefined) => void;
+  onSaveContent: (content: string) => void;
   selected?: ChangeEntry;
   diff?: DiffResult;
   loading: boolean;
@@ -32,6 +37,7 @@ interface DiffPaneProps {
   onOpenConflictEditor: () => void;
   onMarkResolved: () => void;
   workspaceUpdating: boolean;
+  historyPreview: boolean;
   revertingSelectedDiff: boolean;
   onRevertSelectedDiff: (content: string, hunkCount: number) => void;
   propertyDiff?: string | null;
@@ -152,6 +158,7 @@ function formatBytes(bytes: number) {
 }
 
 export function DiffPane({
+  directoryChanges, onSelectFile, draftContent, onDraftChange, onSaveContent,
   selected,
   diff,
   loading,
@@ -163,6 +170,7 @@ export function DiffPane({
   onOpenConflictEditor,
   onMarkResolved,
   workspaceUpdating,
+  historyPreview,
   revertingSelectedDiff,
   onRevertSelectedDiff,
   propertyDiff,
@@ -171,6 +179,12 @@ export function DiffPane({
   propertyDiffError,
   onLoadPropertyDiff,
 }: DiffPaneProps) {
+  const [cursorText, setCursorText] = useState("行 1，列 1");
+  const actionRef = useRef({ save: () => {}, revert: () => {} });
+  const contentListenerRef = useRef<{ dispose: () => void } | null>(null);
+  const menuActionsRef = useRef<{ dispose: () => void }[]>([]);
+  const draftCallbackRef = useRef({ onDraftChange, modified: diff?.modified });
+  draftCallbackRef.current = { onDraftChange, modified: diff?.modified };
   const [viewMode, setViewMode] = useState<DiffViewMode>("all");
   const [diffPalette, setDiffPalette] = useState<DiffPalette>(initialDiffPalette);
   const [diffCount, setDiffCount] = useState(0);
@@ -192,7 +206,41 @@ export function DiffPane({
   const originalSearchDecorationsRef = useRef<DecorationsCollection | null>(null);
   const modifiedSearchDecorationsRef = useRef<DecorationsCollection | null>(null);
 
-  const handleEditorMount: DiffOnMount = (editor) => {
+  const handleEditorMount: DiffOnMount = (editor, monaco) => {
+    // Release models after the diff editor detaches them on unmount
+    const mountedModels = editor.getModel();
+    editor.onDidDispose(() => queueMicrotask(() => {
+      mountedModels?.original.dispose();
+      mountedModels?.modified.dispose();
+    }));
+    contentListenerRef.current?.dispose();
+    menuActionsRef.current.forEach((action) => action.dispose());
+    menuActionsRef.current = [];
+    const modifiedEditor = editor.getModifiedEditor();
+    contentListenerRef.current = modifiedEditor.onDidChangeModelContent(() => {
+      const content = modifiedEditor.getValue();
+      const callback = draftCallbackRef.current;
+      callback.onDraftChange(content === callback.modified ? undefined : content);
+    });
+    for (const [command, label] of [["undo", "撤销编辑"], ["redo", "重做编辑"]]) {
+      menuActionsRef.current.push(modifiedEditor.addAction({
+        id: `svn-scope.${command}`, label,
+        contextMenuGroupId: "edit", contextMenuOrder: command === "undo" ? 1 : 2,
+        run: () => modifiedEditor.trigger("context-menu", command, null),
+      }));
+    }
+    for (const codeEditor of [editor.getOriginalEditor(), modifiedEditor]) {
+      menuActionsRef.current.push(codeEditor.addAction({
+        id: "svn-scope.revert-selection", label: "SVN：还原光标处 / 选中的差异…",
+        contextMenuGroupId: "svn", contextMenuOrder: 1,
+        run: () => actionRef.current.revert(),
+      }));
+    }
+    menuActionsRef.current.push(modifiedEditor.addAction({
+      id: "svn-scope.save", label: "保存工作文件", keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS],
+      contextMenuGroupId: "svn", contextMenuOrder: 2,
+      run: () => actionRef.current.save(),
+    }));
     diffUpdateListenerRef.current?.dispose();
     editorDisposeListenerRef.current?.dispose();
     originalSelectionListenerRef.current?.dispose();
@@ -212,6 +260,9 @@ export function DiffPane({
     };
     const watchSelection = (side: DiffSide, codeEditor: MountedCodeEditor) => (
       codeEditor.onDidChangeCursorSelection((event) => {
+        const position = event.selection.getPosition();
+        const selectedText = codeEditor.getModel()?.getValueInRange(event.selection) ?? "";
+        setCursorText(`${side === "original" ? "BASE" : "工作副本"} · 行 ${position.lineNumber}，列 ${position.column}${selectedText ? ` · 已选 ${selectedText.length} 字符` : ""}`);
         diffSelectionRef.current = {
           side,
           startLineNumber: event.selection.startLineNumber,
@@ -224,6 +275,7 @@ export function DiffPane({
     modifiedSelectionListenerRef.current = watchSelection("modified", editor.getModifiedEditor());
     diffUpdateListenerRef.current = editor.onDidUpdateDiff(() => {
       window.requestAnimationFrame(() => {
+        if (editorRef.current !== editor) return;
         applyCollapsedState(editor, viewModeRef.current);
         updateDiffCount();
       });
@@ -252,7 +304,8 @@ export function DiffPane({
   const revertSelectedHunks = () => {
     const editor = editorRef.current;
     const selection = diffSelectionRef.current;
-    if (!editor || !diff || !selection || diff.truncated) return;
+    if (!editor || !diff || !selection || diff.truncated || workspaceUpdating || historyPreview || revertingSelectedDiff) return;
+    if (draftContent !== undefined) { window.alert("请先保存或撤销编辑，再还原 SVN 差异"); return; }
     const result = revertSelectedDiffChanges(
       diff.original,
       diff.modified,
@@ -261,9 +314,16 @@ export function DiffPane({
     );
     if (!result) return;
     if (!window.confirm(
-      `确定将选中的 ${result.hunkCount} 处差异还原为 SVN BASE 内容吗？\n\n此操作会写入工作文件，但仍可通过 SVN 恢复。`,
+      `确定将选中的 ${result.hunkCount} 处差异还原为 SVN BASE 内容吗？\n\n此操作会覆盖工作文件中选中的本地修改，未提交内容无法通过 SVN 找回。`,
     )) return;
     onRevertSelectedDiff(result.content, result.hunkCount);
+  };
+
+  actionRef.current = {
+    revert: revertSelectedHunks,
+    save: () => {
+      if (draftContent !== undefined && !workspaceUpdating && !historyPreview && !revertingSelectedDiff && diff && !diff.truncated) onSaveContent(draftContent);
+    },
   };
 
   const getSideEditor = (side: DiffSide) => {
@@ -381,7 +441,6 @@ export function DiffPane({
   }, [diffPalette]);
 
   useEffect(() => {
-    setDiffCount(0);
     setSelectedHunkCount(0);
     diffSelectionRef.current = undefined;
     originalSearchDecorationsRef.current?.clear();
@@ -392,7 +451,7 @@ export function DiffPane({
       original: createInitialSideSearch(),
       modified: createInitialSideSearch(),
     });
-  }, [diff?.modified, diff?.original, diff?.path]);
+  }, [diff?.path]);
 
   useEffect(
     () => () => {
@@ -400,6 +459,8 @@ export function DiffPane({
       editorDisposeListenerRef.current?.dispose();
       originalSelectionListenerRef.current?.dispose();
       modifiedSelectionListenerRef.current?.dispose();
+      contentListenerRef.current?.dispose();
+      menuActionsRef.current.forEach((action) => action.dispose());
       editorRef.current = null;
     },
     [],
@@ -595,22 +656,7 @@ export function DiffPane({
                     <Icon name="chevron" size={13} className="next" />
                   </button>
                 </div>
-                <button
-                  type="button"
-                  className="diff-selection-revert"
-                  disabled={!editorReady || !selectedHunkCount || diff.truncated || revertingSelectedDiff || workspaceUpdating}
-                  title={workspaceUpdating
-                    ? "SVN Update 进行中，结束后再还原差异"
-                    : diff.truncated
-                      ? "大文件 Diff 已截断，不能安全局部还原"
-                    : selectedHunkCount
-                      ? `将选中的 ${selectedHunkCount} 处差异还原为 SVN BASE`
-                      : "先在任一侧选中一处或多处差异"}
-                  onClick={revertSelectedHunks}
-                >
-                  {revertingSelectedDiff ? <span className="spinner" /> : <Icon name="undo" size={12} />}
-                  还原选中差异{selectedHunkCount ? ` · ${selectedHunkCount}` : ""}
-                </button>
+                <span className="editor-selection-hint" title="在代码区右键还原光标处或选中的差异">右键操作{selectedHunkCount ? ` · 选中 ${selectedHunkCount} 处差异` : ""}</span>
               </div>
 
               <button
@@ -744,6 +790,11 @@ export function DiffPane({
               <span aria-hidden="true" />
             </div>
           )}
+          {canSwitchView && <div className="editor-status" role="status">
+            <span>{cursorText}</span><span>{draftContent !== undefined ? "未保存" : "已保存"}</span>
+            <button type="button" disabled={draftContent === undefined || workspaceUpdating || historyPreview || revertingSelectedDiff} onClick={() => actionRef.current.save()}>保存 Ctrl+S</button>
+            <button type="button" disabled={draftContent === undefined || revertingSelectedDiff} onClick={() => { if (window.confirm("放弃当前未保存的编辑？")) onDraftChange(undefined); }}>放弃编辑</button>
+          </div>}
           <div className={`diff-side-labels ${canSwitchView ? "with-overview" : ""}`}>
             <div>
               <span>{diff.originalLabel}</span>
@@ -773,6 +824,14 @@ export function DiffPane({
               </div>
               <h2>{diff.isDirectory ? "目录变更" : "二进制文件"}</h2>
               <p>{diff.note}</p>
+              {diff.isDirectory && <div className="directory-change-list">
+                <strong>此目录下的变更 · {directoryChanges.length} 项</strong>
+                {directoryChanges.map((change) => <button type="button" key={change.path} onClick={() => onSelectFile(change)} title={change.path}>
+                  <span className="status-badge" data-status={change.statusCode}>{displayStatusCode(change.statusCode)}</span>
+                  <Icon name={change.isDirectory ? "folder" : "file"} size={15} /><span>{change.relativePath}</span>
+                </button>)}
+                {!directoryChanges.length && <p>此目录没有子项变更，仅目录本身发生修改。</p>}
+              </div>}
               {diff.isBinary && beyondCompareAvailable && (
                 <button type="button" className="primary-button" onClick={onOpenBeyondCompare}>
                   <Icon name="external" size={16} />
@@ -785,13 +844,22 @@ export function DiffPane({
               {diff.note && <div className="diff-note">{diff.note}</div>}
               <DiffEditor
                 original={diff.original}
-                modified={diff.modified}
+                modified={draftContent ?? diff.modified}
                 language={languageForPath(diff.path)}
                 theme={monacoThemeForPalette(effectivePalette)}
                 onMount={handleEditorMount}
+                keepCurrentOriginalModel
+                keepCurrentModifiedModel
                 loading={<div className="diff-loading"><span className="spinner" /> 正在加载编辑器…</div>}
                 options={{
-                  readOnly: true,
+                  readOnly: diff.truncated || workspaceUpdating || historyPreview || revertingSelectedDiff || selected.item === "deleted" || selected.item === "missing",
+                  domReadOnly: false,
+                  contextmenu: true,
+                  renderLineHighlight: "all",
+                  cursorStyle: "line",
+                  cursorWidth: 2,
+                  cursorBlinking: "blink",
+                  readOnlyMessage: { value: historyPreview ? "正在核对历史列表，完成后可编辑" : "当前文件只读（BASE、截断内容、已删除文件或正在执行 SVN 操作）" },
                   originalEditable: false,
                   renderSideBySide: true,
                   useInlineViewWhenSpaceIsLimited: false,

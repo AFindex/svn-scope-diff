@@ -11,6 +11,7 @@ use tauri::{AppHandle, Emitter};
 
 pub const CHANGED_EVENT: &str = "working-copy-changed";
 pub const ERROR_EVENT: &str = "working-copy-watch-error";
+const MAX_BATCH_DELAY: Duration = Duration::from_secs(2);
 const DEBOUNCE_INTERVAL: Duration = Duration::from_millis(450);
 
 #[derive(Clone, Default)]
@@ -103,6 +104,19 @@ pub fn start(
             .map_err(|error| format!("无法监听目录 {}：{error}", scope.display()))?;
     }
 
+    // SVN properties, BASE and scheduling changes may only touch wc.db
+    let admin_directory = Path::new(wc_root).join(".svn");
+    if !minimal_scopes
+        .iter()
+        .any(|scope| path_scope::path_is_within(&admin_directory, scope))
+    {
+        watcher
+            .watch(&admin_directory, RecursiveMode::NonRecursive)
+            .map_err(|error| {
+                format!("无法监听 SVN 元数据 {}：{error}", admin_directory.display())
+            })?;
+    }
+
     let (watcher_id, previous) = {
         let mut state = manager
             .inner
@@ -162,6 +176,7 @@ fn event_loop(
 ) {
     let mut pending: HashMap<String, PathBuf> = HashMap::new();
     let mut deadline: Option<Instant> = None;
+    let mut batch_started: Option<Instant> = None;
 
     loop {
         let timeout = deadline
@@ -172,12 +187,21 @@ fn event_loop(
                 if matches!(event.kind, EventKind::Access(_)) {
                     continue;
                 }
+                if event.need_rescan()
+                    || event.paths.iter().any(|path| {
+                        is_svn_admin_path(path)
+                            && path
+                                .file_name()
+                                .is_some_and(|name| name == "wc.db" || name == "wc.db-wal")
+                    })
+                {
+                    for scope in &scopes {
+                        pending.insert(path_scope::path_key(scope), scope.clone());
+                    }
+                }
                 for path in event.paths {
                     let path = std::path::absolute(&path).unwrap_or(path);
                     if is_svn_admin_path(&path)
-                        || scopes
-                            .iter()
-                            .any(|scope| path_scope::path_key(&path) == path_scope::path_key(scope))
                         || !scopes
                             .iter()
                             .any(|scope| path_scope::path_is_within(&path, scope))
@@ -187,10 +211,21 @@ fn event_loop(
                     pending.insert(path_scope::path_key(&path), path);
                 }
                 if !pending.is_empty() {
-                    deadline = Some(Instant::now() + DEBOUNCE_INTERVAL);
+                    let now = Instant::now();
+                    let started = *batch_started.get_or_insert(now);
+                    deadline = Some(batch_deadline(started, now));
+                    if now >= started + MAX_BATCH_DELAY {
+                        emit_pending(&app, watcher_id, &mut pending);
+                        deadline = None;
+                        batch_started = None;
+                    }
                 }
             }
             Ok(Err(error)) => {
+                for scope in &scopes {
+                    pending.insert(path_scope::path_key(scope), scope.clone());
+                }
+                deadline = Some(Instant::now() + DEBOUNCE_INTERVAL);
                 let _ = app.emit(
                     ERROR_EVENT,
                     WorkingCopyWatchError {
@@ -202,6 +237,7 @@ fn event_loop(
             Err(RecvTimeoutError::Timeout) => {
                 emit_pending(&app, watcher_id, &mut pending);
                 deadline = None;
+                batch_started = None;
             }
             Err(RecvTimeoutError::Disconnected) => {
                 emit_pending(&app, watcher_id, &mut pending);
@@ -209,6 +245,10 @@ fn event_loop(
             }
         }
     }
+}
+
+fn batch_deadline(started: Instant, now: Instant) -> Instant {
+    (now + DEBOUNCE_INTERVAL).min(started + MAX_BATCH_DELAY)
 }
 
 fn emit_pending(app: &AppHandle, watcher_id: u64, pending: &mut HashMap<String, PathBuf>) {
@@ -242,6 +282,19 @@ fn scope_set_key(directories: &[String]) -> String {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn continuous_writes_cannot_defer_a_batch_forever() {
+        let started = Instant::now();
+        assert_eq!(
+            batch_deadline(started, started),
+            started + DEBOUNCE_INTERVAL
+        );
+        assert_eq!(
+            batch_deadline(started, started + Duration::from_millis(1900)),
+            started + MAX_BATCH_DELAY
+        );
+    }
 
     #[test]
     fn ignores_svn_administration_paths_case_insensitively() {

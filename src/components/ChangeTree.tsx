@@ -176,7 +176,7 @@ export function ChangeTree({
 
   const renderNode = (node: TreeNode, level: number) => {
     const isCollapsed = collapsed.has(node.key);
-    const isSelected = node.change?.path === selectedPath;
+    const isSelected = contextChangeForNode(node, scopeDirectory, scopeDirectories).path === selectedPath;
     const actionSelected = Boolean(
       node.change && selectedActionPaths.has(actionPathKey(node.change.path)),
     );
@@ -246,7 +246,7 @@ export function ChangeTree({
                   visibleOrderedChanges,
                 );
               }
-              else if (node.isFolder) toggle(node.key);
+              else if (node.isFolder) onSelect(contextChange, { toggle: false, range: false }, visibleOrderedChanges);
             }}
             onDoubleClick={() => node.isFolder && toggle(node.key)}
           >
