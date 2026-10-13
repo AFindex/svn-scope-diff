@@ -297,6 +297,24 @@ pub fn scan_changed_paths(
     })
 }
 
+// 只查询目标自身，由 SVN 判断忽略规则，避免递归扫描生成目录
+pub(crate) fn watch_path_status(path: &Path) -> Result<String, String> {
+    let output = run_svn([
+        OsString::from("status"),
+        OsString::from("--xml"),
+        OsString::from("--depth"),
+        OsString::from("empty"),
+        OsString::from("--no-ignore"),
+        OsString::from("--ignore-externals"),
+        OsString::from("--"),
+        svn_target(path),
+    ])?;
+    let document: StatusDocument = from_str(&String::from_utf8_lossy(&output.stdout))
+        .map_err(|error| format!("无法解析 svn status XML：{error}"))?;
+    Ok(document.targets.into_iter().flat_map(|target| target.entries)
+        .next().map(|entry| entry.status.item).unwrap_or_else(|| "normal".to_owned()))
+}
+
 pub fn file_diff(
     path: &str,
     item: &str,

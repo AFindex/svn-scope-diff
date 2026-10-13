@@ -1,4 +1,5 @@
 use crate::models::{WorkingCopyChanged, WorkingCopyWatchError, WorkingCopyWatcherStatus};
+use crate::watch_path_filter::WatchPathFilter;
 use crate::{path_scope, svn};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::HashMap;
@@ -133,7 +134,8 @@ pub fn start(
     };
     drop(previous);
 
-    thread::spawn(move || event_loop(app, watcher_id, minimal_scopes, receiver));
+    let wc_root = PathBuf::from(wc_root);
+    thread::spawn(move || event_loop(app, watcher_id, minimal_scopes, wc_root, receiver));
     Ok(WorkingCopyWatcherStatus {
         watcher_id: Some(watcher_id),
         directories: directory_strings,
@@ -172,8 +174,10 @@ fn event_loop(
     app: AppHandle,
     watcher_id: u64,
     scopes: Vec<PathBuf>,
+    wc_root: PathBuf,
     receiver: Receiver<notify::Result<Event>>,
 ) {
+    let mut path_filter = WatchPathFilter::default();
     let mut pending: HashMap<String, PathBuf> = HashMap::new();
     let mut deadline: Option<Instant> = None;
     let mut batch_started: Option<Instant> = None;
@@ -195,10 +199,12 @@ fn event_loop(
                                 .is_some_and(|name| name == "wc.db" || name == "wc.db-wal")
                     })
                 {
+                    path_filter.clear();
                     for scope in &scopes {
                         pending.insert(path_scope::path_key(scope), scope.clone());
                     }
                 }
+                path_filter.invalidate_event(&event);
                 for path in event.paths {
                     let path = std::path::absolute(&path).unwrap_or(path);
                     if is_svn_admin_path(&path)
@@ -206,6 +212,10 @@ fn event_loop(
                             .iter()
                             .any(|scope| path_scope::path_is_within(&path, scope))
                     {
+                        continue;
+                    }
+                    // 忽略状态检查失败时仍交给原扫描处理并显示错误，不丢弃有效改动
+                    if path_filter.is_ignored(&path, &wc_root).unwrap_or(false) {
                         continue;
                     }
                     pending.insert(path_scope::path_key(&path), path);
@@ -222,6 +232,7 @@ fn event_loop(
                 }
             }
             Ok(Err(error)) => {
+                path_filter.clear();
                 for scope in &scopes {
                     pending.insert(path_scope::path_key(scope), scope.clone());
                 }

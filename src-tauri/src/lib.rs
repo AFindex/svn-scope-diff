@@ -7,6 +7,7 @@ mod svn;
 mod svn_update;
 mod system_shell;
 mod tortoise_svn;
+mod watch_path_filter;
 mod working_copy_watcher;
 
 use models::{

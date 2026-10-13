@@ -876,6 +876,7 @@ export default function App() {
     storeDiffCache,
   ]);
 
+  // 局部刷新会重建 selected 对象，按文件路径保持检测计时器运行
   useEffect(() => {
     if (!selected || selected.isDirectory || !diff || svnUpdate.running) return;
     let active = true;
@@ -888,12 +889,13 @@ export default function App() {
       } catch {
         return;
       }
-      if (!active || writingFileRef.current || selectedRef.current?.path !== path) return;
+      const currentSelected = selectedRef.current;
+      if (!active || writingFileRef.current || !currentSelected || currentSelected.path !== path) return;
 
       const pending = pendingFileUpdateRef.current;
       if (pending?.path === path) {
         if (!sameFingerprint(pending.fingerprint, fingerprint)) {
-          requestFileReload(selected, fingerprint);
+          requestFileReload(currentSelected, fingerprint);
         }
         return;
       }
@@ -904,7 +906,7 @@ export default function App() {
         return;
       }
       if (!sameFingerprint(baseline.fingerprint, fingerprint)) {
-        requestFileReload(selected, fingerprint);
+        requestFileReload(currentSelected, fingerprint);
       }
     };
 
@@ -913,7 +915,7 @@ export default function App() {
       active = false;
       window.clearInterval(timer);
     };
-  }, [diff, requestFileReload, selected, svnUpdate.running]);
+  }, [diff?.path, requestFileReload, selected?.path, selected?.isDirectory, svnUpdate.running]);
 
   const keepCurrentDiff = useCallback(() => {
     const update = pendingFileUpdateRef.current;

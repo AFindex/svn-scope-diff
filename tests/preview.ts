@@ -1,5 +1,6 @@
 // Browser-only UI fixture: does not read or write the user's working copy
 import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
+import { emit } from "@tauri-apps/api/event";
 const directory = "C:\\fixture";
 let modified = "class Player\r\n{\r\n    int health = 200;\r\n}\r\n";
 let original = modified.replace("200", "100");
@@ -9,6 +10,27 @@ let changes = [
   { path: directory + "\\src\\New.cs", relativePath: "src/New.cs", name: "New.cs", item: "unversioned", statusCode: "?", properties: "none", isDirectory: false, treeConflicted: false, baseRevision: null },
 ];
 const commitPreview = new URLSearchParams(location.search).has("commit");
+const watchPreview = new URLSearchParams(location.search).has("watch");
+if (watchPreview) {
+  const button = document.createElement("button");
+  button.textContent = "模拟持续刷新和外部保存";
+  button.style.cssText = "position:fixed;right:20px;bottom:30px;z-index:9999";
+  button.onclick = () => {
+    button.disabled = true;
+    button.textContent = "模拟持续刷新中（15秒）";
+    modified = modified.replace("200", "333");
+    revision++;
+    // 每 300ms 重建选中项，复现比文件检测间隔更快的局部刷新
+    const timer = setInterval(() => {
+      void emit("working-copy-changed", { watcherId: 1, paths: [changes[0].path] });
+    }, 300);
+    setTimeout(() => {
+      clearInterval(timer);
+      button.textContent = "模拟刷新已结束";
+    }, 15000);
+  };
+  document.body.append(button);
+}
 if (commitPreview) {
   changes.push({ ...changes[1], path: directory + "\\new-folder", relativePath: "new-folder", name: "new-folder", isDirectory: true });
   const button = document.createElement("button");
@@ -34,7 +56,7 @@ mockIPC(async (command, args: any) => {
   }
   if (command === "scan_changed_paths") return {
     roots: args.paths,
-    changes: changes.filter((change) => args.paths.some((path: string) => change.path === path || change.path.startsWith(path + "\\"))),
+    changes: changes.filter((change) => args.paths.some((path: string) => change.path === path || change.path.startsWith(path + "\\"))).map((change) => ({ ...change })),
   };
   if (command === "get_file_fingerprint") return { exists: true, isDirectory: false, size: modified.length, modifiedNs: String(revision) };
   if (command === "get_file_diff") return { path: args.path, original: args.isDirectory ? "" : original, modified: args.isDirectory ? "" : modified, originalLabel: "BASE · r1", modifiedLabel: "工作副本", originalEncoding: "UTF-8", modifiedEncoding: "UTF-8", originalBytes: original.length, modifiedBytes: modified.length, isBinary: false, isDirectory: args.isDirectory, truncated: false, note: null };
@@ -47,5 +69,5 @@ mockIPC(async (command, args: any) => {
   if (command.includes("availability")) return { available: commitPreview, path: null, autoSelectFiles: true, showUnversioned: true };
   if (command === "plugin:event|listen") return 1;
   return null;
-});
+}, { shouldMockEvents: true });
 await import("../src/main");
