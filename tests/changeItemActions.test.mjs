@@ -61,7 +61,7 @@ test("only enables actions that make sense for the selected SVN item", () => {
   });
   assert.deepEqual(changeActionCapabilities(unversionedDirectory, true), {
     canOpen: true,
-    canCommit: false,
+    canCommit: true,
     canRevert: false,
     canBlame: false,
     canShowLog: false,

@@ -13,6 +13,7 @@ const {
   mergeScanPatch,
   patchTouchesPath,
   refreshTargetsForDirectory,
+  refreshPathsForChanges,
   relativeChangePath,
 } = await import(moduleUrl);
 
@@ -66,4 +67,24 @@ test("chooses safe refresh targets for real and grouping directories", () => {
   );
   assert.deepEqual(refreshTargetsForDirectory("F:\\wc", scopes), scopes);
   assert.equal(relativeChangePath("F:\\wc\\feature-a\\src", "f:/wc"), "feature-a/src");
+});
+
+
+test("提交新目录中的文件后同时刷新原未版本化父目录", () => {
+  const directory = { ...change("F:/wc/new", "new", "unversioned"), isDirectory: true };
+  const nested = { ...change("F:/wc/new/nested", "new/nested", "unversioned"), isDirectory: true };
+  const child = change("F:/wc/new/nested/added.cs", "new/nested/added.cs", "unversioned");
+  const unrelated = change("F:/wc/keep.cs", "keep.cs");
+  const current = [directory, nested, child, unrelated];
+  const roots = refreshPathsForChanges([child.path], current);
+  assert.deepEqual(roots, [directory.path]);
+  assert.deepEqual(mergeScanPatch(current, { roots, changes: [] }), [unrelated]);
+});
+
+test("已提交文件的空状态补丁移除旧条目但保留其他修改", () => {
+  const committed = change("F:/wc/src/submitted.cs", "src/submitted.cs");
+  const remaining = change("F:/wc/src/keep.cs", "src/keep.cs");
+  assert.deepEqual(mergeScanPatch([committed, remaining], {
+    roots: refreshPathsForChanges([committed.path], [committed, remaining]), changes: [],
+  }), [remaining]);
 });

@@ -64,7 +64,6 @@ export function changeActionCapabilities(
     canOpen: !["deleted", "missing"].includes(change.item),
     canCommit: tortoiseAvailable
       && !change.contextOnly
-      && !(change.item === "unversioned" && change.isDirectory)
       && !conflicted,
     canRevert: tortoiseAvailable && versioned && !change.contextOnly,
     canBlame: tortoiseAvailable && !change.isDirectory && canBlameWorkingFile,

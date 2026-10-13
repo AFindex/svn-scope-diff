@@ -116,7 +116,7 @@ export function ChangeList({
               label={`选择提交 ${change.relativePath}`}
               title={commitSelectable
                 ? `将 ${change.relativePath} 加入提交选择`
-                : "未版本化目录不会直接转交，避免 TortoiseSVN 递归加入未知文件"}
+                : "此项没有可提交的变更"}
               onChange={(checked) => onToggleCommitSelection([change], checked)}
             />
             <button

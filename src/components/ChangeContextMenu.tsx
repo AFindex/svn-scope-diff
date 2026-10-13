@@ -86,9 +86,7 @@ export function ChangeContextMenu({
   const batch = selectedTargets.length > 1;
   const capabilities = changeActionCapabilities(change, tortoiseAvailable);
   const committableTargets = selectedTargets.filter((target) => (
-    !target.contextOnly
-    && !(target.item === "unversioned" && target.isDirectory)
-    && !isConflictedChange(target)
+    changeActionCapabilities(target, tortoiseAvailable).canCommit
   ));
   const revertibleTargets = selectedTargets.filter(
     (target) => target.item !== "unversioned" && !target.contextOnly,
@@ -234,7 +232,7 @@ export function ChangeContextMenu({
                 : unavailableTitle
                   ?? (conflicted
                     ? "请先解决冲突后再提交"
-                    : "未版本化目录不能作为精确单项提交目标")}
+                    : "此项不能提交")}
               onSelect={() => choose("commit", committableTargets)}
             />
           </div>

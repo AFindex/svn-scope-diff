@@ -36,8 +36,9 @@ import { DiffPane } from "./components/DiffPane";
 import { Icon } from "./components/Icons";
 import type { ChangeItemAction } from "./changeItemActions";
 import { DiffCache, sameFingerprint } from "./diffCache";
+import { ScanRefreshQueue } from "./scanRefreshQueue";
 import { textDiffChanges } from "./textDiffFiles";
-import { mergeScanPatch, patchTouchesPath, relativeChangePath } from "./scanPatch";
+import { mergeScanPatch, patchTouchesPath, refreshPathsForChanges, relativeChangePath } from "./scanPatch";
 import {
   ancestorDirectorySelectionKeys,
   expandCommitSelectionKeys,
@@ -261,8 +262,7 @@ export default function App() {
   const watcherIdRef = useRef<number | null>(null);
   const scanLoadingRef = useRef(false);
   const writingFileRef = useRef(false);
-  const scanGenerationRef = useRef(0);
-  const partialRefreshTailRef = useRef<Promise<void>>(Promise.resolve());
+  const partialRefreshQueueRef = useRef(new ScanRefreshQueue());
   const svnUpdateRunningRef = useRef(false);
   const pendingAutoRefreshPathsRef = useRef(new Map<string, string>());
   const autoRefreshRunningRef = useRef(false);
@@ -396,7 +396,7 @@ export default function App() {
     if (scanLoadingRef.current || writingFileRef.current) return undefined;
     if (!preserveSelection && !discardDraft()) return undefined;
     scanLoadingRef.current = true;
-    scanGenerationRef.current += 1;
+    partialRefreshQueueRef.current.invalidate();
     bulkDiffRunRef.current += 1;
     bulkDiffRunningRef.current = false;
     setBulkDiffProgress(undefined);
@@ -510,43 +510,38 @@ export default function App() {
     return updated;
   }, []);
 
-  const refreshChangedPaths = useCallback(async (paths: string[], announce: boolean) => {
+  const refreshChangedPaths = useCallback(async (
+    paths: string[], announce: boolean, priority = announce,
+  ) => {
     const current = scanRef.current;
-    if (!current || !paths.length || svnUpdateRunningRef.current) return undefined;
-    const generation = scanGenerationRef.current;
-    const previous = partialRefreshTailRef.current;
-    let release!: () => void;
-    partialRefreshTailRef.current = new Promise<void>((resolve) => { release = resolve; });
-    await previous;
-    if (generation !== scanGenerationRef.current || scanLoadingRef.current || svnUpdateRunningRef.current) { release(); return undefined; }
-    if (announce) setPartialScanLoading(true);
-    try {
-      const patch = await invoke<ScanPatch>("scan_changed_paths", {
-        scopeDirectories: current.scopeDirectories,
-        paths,
-        displayRoot: current.directory,
-        wcRoot: current.wcRoot,
-      });
-      const latest = scanRef.current;
-      if (generation !== scanGenerationRef.current || !latest || scopeSetKey(latest.scopeDirectories) !== scopeSetKey(current.scopeDirectories)) {
+    if (!current || !paths.length || scanLoadingRef.current || svnUpdateRunningRef.current) return undefined;
+    return partialRefreshQueueRef.current.run(async (isCurrent) => {
+      if (scanLoadingRef.current || svnUpdateRunningRef.current) return undefined;
+      if (announce) setPartialScanLoading(true);
+      try {
+        const patch = await invoke<ScanPatch>("scan_changed_paths", {
+          scopeDirectories: current.scopeDirectories,
+          paths: refreshPathsForChanges(paths, current.changes),
+          displayRoot: current.directory,
+          wcRoot: current.wcRoot,
+        });
+        const latest = scanRef.current;
+        if (!isCurrent() || !latest || scanLoadingRef.current
+          || scopeSetKey(latest.scopeDirectories) !== scopeSetKey(current.scopeDirectories)) return undefined;
+        const updated = applyScanPatch(patch);
+        setAutoRefreshError(undefined);
+        if (announce && updated) setToast(`局部刷新完成：当前共 ${updated.changes.length} 项变更`);
+        return updated;
+      } catch (error) {
+        if (!isCurrent()) return undefined;
+        const message = errorMessage(error);
+        if (announce) setToast(message);
+        else setAutoRefreshError(message);
         return undefined;
+      } finally {
+        if (announce) setPartialScanLoading(false);
       }
-      if (scanLoadingRef.current) return undefined;
-      const updated = applyScanPatch(patch);
-      setAutoRefreshError(undefined);
-      if (announce && updated) {
-        setToast(`局部刷新完成：当前共 ${updated.changes.length} 项变更`);
-      }
-      return updated;
-    } catch (error) {
-      const message = errorMessage(error);
-      if (announce) setToast(message);
-      else setAutoRefreshError(message);
-      return undefined;
-    } finally {
-      if (announce) setPartialScanLoading(false);
-      release();
-    }
+    }, priority);
   }, [applyScanPatch]);
 
   const flushAutoRefreshQueue = useCallback(async () => {
@@ -640,8 +635,11 @@ export default function App() {
         : [];
       if (!relevantPaths.length) return;
       void (async () => {
-        const updated = await refreshChangedPaths(relevantPaths, false);
+        const updated = await refreshChangedPaths(relevantPaths, false, true);
         if (!active) return;
+        if (!updated) {
+          for (const path of relevantPaths) pendingAutoRefreshPathsRef.current.set(normalizedPath(path), path);
+        }
         const labels: Record<TortoiseOperationFinished["action"], string> = {
           commit: "提交",
           revert: "Revert",
@@ -1066,12 +1064,27 @@ export default function App() {
     const runId = bulkDiffRunRef.current + 1;
     bulkDiffRunRef.current = runId;
     bulkDiffRunningRef.current = true;
+    setBulkDiffProgress({ completed: 0, total: eligibleTextChanges.length });
+    const refreshed = await refreshChangedPaths(eligibleTextChanges.map((change) => change.path), true, true);
+    if (bulkDiffRunRef.current !== runId) return;
+    if (!refreshed) {
+      bulkDiffRunningRef.current = false;
+      setBulkDiffProgress(undefined);
+      return;
+    }
+    const currentTextChanges = textDiffChanges(refreshed.changes);
+    if (!currentTextChanges.length) {
+      bulkDiffRunningRef.current = false;
+      setBulkDiffProgress(undefined);
+      setToast("已核对 SVN 状态，当前没有待更新的文本变更");
+      return;
+    }
     diffCacheRef.current.setLimit(Math.max(
       DIFF_CACHE_LIMIT,
-      eligibleTextChanges.length + DIFF_CACHE_LIMIT,
+      currentTextChanges.length + DIFF_CACHE_LIMIT,
     ));
     setToast(undefined);
-    setBulkDiffProgress({ completed: 0, total: eligibleTextChanges.length });
+    setBulkDiffProgress({ completed: 0, total: currentTextChanges.length });
 
     const counters: BulkDiffCounters = {
       completed: 0,
@@ -1090,12 +1103,12 @@ export default function App() {
       const now = Date.now();
       if (
         isCurrentRun()
-        && (counters.completed === eligibleTextChanges.length || now - lastProgressUpdate >= 100)
+        && (counters.completed === currentTextChanges.length || now - lastProgressUpdate >= 100)
       ) {
         lastProgressUpdate = now;
         setBulkDiffProgress({
           completed: counters.completed,
-          total: eligibleTextChanges.length,
+          total: currentTextChanges.length,
         });
       }
     };
@@ -1175,14 +1188,14 @@ export default function App() {
       while (isCurrentRun()) {
         const index = nextIndex;
         nextIndex += 1;
-        if (index >= eligibleTextChanges.length) return;
-        await processChange(eligibleTextChanges[index]);
+        if (index >= currentTextChanges.length) return;
+        await processChange(currentTextChanges[index]);
         if (!isCurrentRun()) return;
         finishOne();
       }
     };
 
-    const workerCount = Math.min(BULK_DIFF_CONCURRENCY, eligibleTextChanges.length);
+    const workerCount = Math.min(BULK_DIFF_CONCURRENCY, currentTextChanges.length);
     await Promise.all(Array.from({ length: workerCount }, () => worker()));
     if (!isCurrentRun()) return;
 
@@ -1196,7 +1209,7 @@ export default function App() {
     if (counters.binary) details.push(`二进制跳过 ${counters.binary}`);
     if (counters.failed) details.push(`失败 ${counters.failed}`);
     setToast(`文本 Diff 更新完成：${details.join("，")}`);
-  }, [eligibleTextChanges, requestFileReload, storeDiffCache, svnUpdate.running]);
+  }, [eligibleTextChanges, refreshChangedPaths, requestFileReload, storeDiffCache, svnUpdate.running]);
 
   const loadPropertyDiff = useCallback(() => {
     if (!selected || !["modified", "conflicted"].includes(selected.properties)) return;
@@ -1329,10 +1342,14 @@ export default function App() {
   }, []);
 
   const refresh = useCallback(async () => {
-    if (!scan?.scopeDirectories.length || scanLoading || svnUpdate.running || svnUpdateLaunching) return;
+    if (!scan?.scopeDirectories.length || scanLoading || partialScanLoading || svnUpdate.running || svnUpdateLaunching) return;
+    const currentSelected = selectedRef.current;
+    if (currentSelected && !currentSelected.isDirectory) {
+      await refreshChangedPaths([currentSelected.path], true, true);
+    }
     const result = await scanDirectory(scan.scopeDirectories, true);
     if (result) setToast(`已刷新当前目录：${result.changes.length} 项变更`);
-  }, [scan, scanDirectory, scanLoading, svnUpdate.running, svnUpdateLaunching]);
+  }, [partialScanLoading, refreshChangedPaths, scan, scanDirectory, scanLoading, svnUpdate.running, svnUpdateLaunching]);
 
   const toggleCommitSelection = useCallback((targets: ChangeEntry[], checked: boolean) => {
     if (!scan) return;
@@ -1555,7 +1572,7 @@ export default function App() {
             type="button"
             className="toolbar-button refresh-toolbar-button"
             onClick={() => void refresh()}
-            disabled={!scan || scanLoading || svnUpdate.running || svnUpdateLaunching}
+            disabled={!scan || scanLoading || partialScanLoading || svnUpdate.running || svnUpdateLaunching}
             title={svnUpdate.running
               ? "SVN Update 结束后会自动刷新"
               : "重新扫描当前打开目录的本地变更 (Ctrl+R)"}

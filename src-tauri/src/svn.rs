@@ -1376,7 +1376,11 @@ mod tests {
         );
         assert!(outside.is_err());
 
-        run_checked(Command::new("svn").arg("revert").arg(&child_path));
+        let before_commit = file_fingerprint(child_path.to_str().unwrap()).unwrap();
+        run_checked(Command::new("svn").arg("commit").arg(&child_path).args(["-m", "commit changed file"]));
+        let after_commit = file_fingerprint(child_path.to_str().unwrap()).unwrap();
+        assert_eq!(before_commit.size, after_commit.size);
+        assert_eq!(before_commit.modified_ns, after_commit.modified_ns);
         let clean_patch = scan_changed_paths(
             &[selected.to_string_lossy().into_owned()],
             &[child_path.to_string_lossy().into_owned()],
@@ -1385,6 +1389,18 @@ mod tests {
         )
         .unwrap();
         assert!(clean_patch.changes.is_empty());
+        let after_scan = scan(selected.to_str().unwrap()).unwrap();
+        assert!(!after_scan.changes.iter().any(|change| change.relative_path == "child.txt"));
+        assert!(after_scan.changes.iter().any(|change| change.relative_path == "new.txt"));
+
+        // 目录和子文件加入并提交后，目录级刷新必须清掉原来的所有 U 状态
+        run_checked(Command::new("svn").arg("add").arg(&unversioned_root));
+        run_checked(Command::new("svn").arg("commit").arg(&unversioned_root).args(["-m", "commit new directory"]));
+        let directory_patch = scan_changed_paths(
+            &[path_string(&selected)], &[path_string(&unversioned_root)],
+            selected.to_str().unwrap(), working_copy.to_str().unwrap(),
+        ).unwrap();
+        assert!(directory_patch.changes.is_empty());
     }
 
     #[test]

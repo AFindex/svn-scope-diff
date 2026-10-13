@@ -22,7 +22,7 @@
 - 左侧可在“层级 / 列表”间切换；列表支持按相对路径、文件名、所在目录、修改状态、扩展名排序，并可切换升降序。文本与多选后缀现在是组合筛选条件，选项按当前修改动态生成并显示数量，包含目录与无后缀类型；下拉内可一键“全选”或“清除选择”。默认只按文件名匹配，按需开启“目录路径”后才让父目录命中带出子项，避免搜索结果混入整片无关目录。
 - 列表和层级模式都有两套明确分离的选择：复选框只控制提交选择；点击行控制右键批量操作选择，Ctrl 可增减单项，Shift 可连续选择，Ctrl+Shift 可把连续范围并入已有选择。批量选择、当前 Diff 文件和提交勾选使用不同强度的高亮，并提供操作选择计数与清除按钮。
 - 左侧修改区和右侧 Diff 之间有可拖动分隔条；宽度限制会为 Diff 保留可用空间，支持方向键微调、Shift 加速、Home/End 边界、双击复位，并在本机记住上次宽度。拖动过程直接更新网格宽度，避免让 Monaco 高频重渲染。
-- 左侧“用 TortoiseSVN 提交”把勾选项作为具体路径转交给小乌龟 Commit 窗口；大量路径使用 UTF-16LE、无 BOM、LF 分隔的临时 `/pathfile`，完成后由 `/deletepathfile` 清理。未版本化目录不会直接转交，避免意外递归加入未知文件。
+- 左侧“用 TortoiseSVN 提交”把勾选项作为具体路径转交给小乌龟 Commit 窗口；大量路径使用 UTF-16LE、无 BOM、LF 分隔的临时 `/pathfile`，完成后由 `/deletepathfile` 清理。未版本化目录（含空目录）可勾选并转交；选择目录时包含其已扫描子项。
 - 层级和列表中的每个 item 都提供统一右键菜单：局部刷新、提交、Revert、Blame、Show Log、复制相对/完整路径、系统默认打开、在资源管理器中定位，以及冲突项专用的冲突编辑器和“标记为已解决”。操作选择包含多项时，刷新、提交、Revert、Resolve 和复制路径会自动切换为批量操作；不适用于批量的打开、Blame 与 Show Log 会隐藏。顶部扫描范围目录和层级分组目录也有精简的目录菜单。Revert 与 Resolve 只打开 TortoiseSVN 的确认窗口，不会静默执行。
 - 文本、属性和树冲突使用独立红色行标与类型标签；层级目录会汇总后代冲突数。右侧 Diff 同步显示冲突警示、工作副本冲突标签和检测到的文本冲突块，并可直接打开三方冲突编辑器。
 - 顶部“刷新变更”（Ctrl+R）重新扫描全部当前范围；保留仍有效的当前 Diff 文件和提交选择，已恢复干净或消失的条目会从选择中移除。
@@ -61,7 +61,7 @@ Beyond Compare 提供的是独立桌面应用和命令行入口，并没有适�
 $env:SVN_SCOPE_TORTOISEPROC_EXE = 'D:\Tools\TortoiseSVN\bin\TortoiseProc.exe'
 ```
 
-提交按钮只负责打开小乌龟的标准 Commit 窗口，不会绕过确认或直接提交。TortoiseSVN 默认开启“Select items automatically”，因此传入的文件会预先勾选；如果用户关闭该设置，SVN Scope 会显示提示但不会擅自修改注册表。真实目录变更可能让 TortoiseSVN 展开目录，界面会提醒在提交窗口中复核；未版本化目录则明确禁止直接转交。Commit、Revert 或 Resolve 窗口关闭后，SVN Scope 会自动局部刷新这次转交的路径，使已提交或已还原的条目及时消失。
+提交按钮只负责打开小乌龟的标准 Commit 窗口，不会绕过确认或直接提交。TortoiseSVN 默认开启“Select items automatically”，因此传入的文件会预先勾选；如果用户关闭该设置，SVN Scope 会显示提示但不会擅自修改注册表。真实目录变更可能让 TortoiseSVN 展开目录，界面会提醒在提交窗口中复核；未版本化目录同样支持勾选和右键提交。Commit、Revert 或 Resolve 窗口关闭后，SVN Scope 会自动局部刷新这次转交的路径，使已提交或已还原的条目及时消失。
 
 item 右键菜单通过 TortoiseSVN 官方 `TortoiseProc.exe /command:* /path:*` 接口打开 `revert / blame / log / conflicteditor / resolve` 窗口；批量操作与批量提交一样使用 UTF-16、无 BOM 的 `/pathfile`。所有目标在 Rust 侧再次校验，必须同时位于当前扫描范围和 SVN 工作副本之内。`resolve` 不传 `/noquestion`，因此仍由 TortoiseSVN 做最后确认。
 
@@ -115,14 +115,14 @@ npm run portable
 
 ```text
 dist-portable\
-├─ SVN Scope 0.4.1\
+├─ SVN Scope 0.4.2\
 │  ├─ SVN Scope.exe
 │  ├─ Register-ContextMenu.cmd
 │  ├─ Unregister-ContextMenu.cmd
 │  ├─ 对应 PowerShell 脚本
 │  ├─ README-便携版.txt
 │  └─ SHA256SUMS.txt
-└─ SVN-Scope-0.4.1-win-x64.zip
+└─ SVN-Scope-0.4.2-win-x64.zip
 ```
 
 首次构建会下载 npm/crates.io 依赖；之后是纯本机构建。产物不包含安装器或遥测；客户端更新会连接本仓库 GitHub Releases。
@@ -148,7 +148,7 @@ dist-portable\
 
 - 右键菜单使用无需安装/打包身份的经典 Shell 注册方式；Windows 11 通常把它放在“显示更多选项”。要进入新版一级菜单需要实现并注册 `IExplorerCommand`/稀疏包，这与纯便携目标冲突。
 - 未版本化目录会做本地递归展开；如果其中包含非常大的未知目录树，首次展开的成本与本地文件数量相关。SVN 已在扫描范围根部判定为 ignored 的目录仍不会进入列表。
-- 未版本化目录不会被直接转交给 TortoiseSVN；请先在工作副本中明确执行 SVN Add，或选择具体的未版本化文件。真实目录变更在提交窗口中可能展开子项，需要最终复核。
+- 未版本化目录可直接交给 TortoiseSVN 提交窗口，在该窗口确认加入与提交内容；目录目标可能展开子项，需要最终复核。
 - 未签名的 EXE 若从互联网下载，Windows SmartScreen 可能提示未知发布者；本地构建不影响运行。
 - 便携 EXE 使用系统 WebView2 Runtime，不携带体积很大的 Fixed Version Runtime。
 
@@ -181,3 +181,13 @@ dist-portable\
 历史列表不是最新状态的保证。后台核对期间可以浏览、筛选和查看 Diff；核对成功后替换为最新列表并恢复编辑。核对失败会保留历史列表、显示原因，点击“刷新变更”可重试。首次升级到包含此功能的版本仍需完成一次扫描；缓存缺失或损坏时正常扫描，不影响项目文件。
 
 缓存只保存路径和状态等扫描信息，不保存文件正文。界面验证可使用 `tests/preview.html?history=ok`（延迟 15 秒返回最新列表）或 `?history=fail`（模拟后台扫描失败）。
+
+## 0.4.2 提交后刷新修复
+
+“更新全部文本 Diff”现在先查询这些文件的 SVN 状态，再读取仍有修改的文件。提交只改变 BASE、没有改变工作文件时间戳时，也会移除已提交项及其旧 Diff。顶部“刷新变更”先核对当前文件，再执行完整扫描。
+
+显式局部刷新和 TortoiseSVN 操作结束后的刷新不再等待耗时的自动扫描；被取代的旧结果不能覆盖新状态，自动刷新队列会重新核对未完成范围。未版本化目录内文件提交后会刷新原父目录，清除以前展开的目录和子项状态。未保存的编辑仍保留。
+
+未版本化目录（含空目录）现在支持层级、列表的提交勾选，以及右键提交；最终提交仍由 TortoiseSVN 窗口确认。
+
+浏览器回归：打开 `http://localhost:1420/tests/preview.html?commit=1`，点击“模拟提交完成”，再点击“更新全部文本 Diff”，确认 `Player.cs` 从列表和右侧 Diff 中消失；`new-folder` 是空的未版本化目录，可验证层级/列表勾选及右键提交。

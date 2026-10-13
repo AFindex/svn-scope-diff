@@ -442,7 +442,7 @@ export function ChangesPanel({
             title={workspaceUpdating
               ? "SVN Update 进行中，结束后会自动重新扫描"
               : textDiffCount
-              ? "更新全部白名单代码文本 Diff（.py、.cs、.bat、.ts、.cpp 等）"
+              ? "先核对 SVN 状态，再更新全部白名单代码文本 Diff（.py、.cs、.bat、.ts、.cpp 等）"
               : "当前修改中没有符合后缀白名单的代码文本文件"}
             onClick={onUpdateAllTextDiffs}
           >

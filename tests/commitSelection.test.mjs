@@ -50,10 +50,14 @@ test("expands a selected directory to its changed descendants", () => {
   ].sort());
 });
 
-test("does not allow an unversioned directory to be forwarded recursively", () => {
+test("selects unversioned directories, including empty ones, for commit", () => {
   const directory = change("F:\\wc\\generated", "unversioned", true);
-  assert.equal(isCommitSelectable(directory), false);
-  assert.equal(expandCommitSelectionKeys([directory], [directory]).size, 0);
+  const child = change(directory.path + "\\new.cs", "unversioned");
+  assert.equal(isCommitSelectable(directory), true);
+  assert.deepEqual(selectedCommitChanges([directory], expandCommitSelectionKeys([directory], [directory])), [directory]);
+  const entries = [directory, child];
+  assert.deepEqual(selectedCommitChanges(entries, expandCommitSelectionKeys(entries, [directory])), entries);
+  assert.equal(isCommitSelectable({ ...directory, contextOnly: true }), false);
 });
 
 test("reconciles stale selections after refresh and returns selected entries", () => {
