@@ -19,10 +19,10 @@ $newHash = Get-TestHash $sourcePath
 $newHash | Set-Content -LiteralPath (Join-Path $stagePath 'exe.sha256') -Encoding ascii
 & $scriptPath -Target $targetPath -Directory $stagePath -ParentId 2147483647
 if ((Get-TestHash $targetPath) -ne $newHash) { throw 'Update was not installed' }
-if ((Get-TestHash "$targetPath.backup") -ne $oldHash) { throw 'Old client backup was not preserved' }
+if (Test-Path -LiteralPath "$targetPath.backup") { throw 'Old client backup was retained after a successful update' }
 'wrong hash' | Set-Content -LiteralPath (Join-Path $stagePath 'exe.sha256') -Encoding ascii
 & $scriptPath -Target $targetPath -Directory $stagePath -ParentId 2147483647
 if ((Get-TestHash $targetPath) -ne $newHash) { throw 'A corrupted update replaced the client' }
 $failureLog = [IO.File]::ReadAllText((Join-Path $stagePath 'install.log'))
 if (-not $failureLog.Contains('checksum mismatch')) { throw 'Missing installation failure diagnosis' }
-Write-Output "PASS: installation, backup and checksum rejection. Test files: $testRoot"
+Write-Output "PASS: installation, old-version cleanup and checksum rejection. Test files: $testRoot"

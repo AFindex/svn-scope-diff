@@ -16,6 +16,8 @@ pub struct ScanHistory {
     scopes: Vec<String>,
     pub saved_at: u64,
     pub scan: ScanResult,
+    #[serde(default)]
+    pub checkpoint: Option<crate::change_journal::Checkpoint>,
 }
 
 fn scope_keys(directories: &[String]) -> Vec<String> {
@@ -53,7 +55,18 @@ pub fn read(directory: &Path, scopes: &[String]) -> Option<ScanHistory> {
 }
 
 // 成功扫描后原子替换历史列表，最多保留最近 12 组目录
+#[cfg(test)]
 pub fn write(directory: &Path, scopes: &[String], scan: &ScanResult) -> Result<(), String> {
+    write_checkpoint(directory, scopes, scan, None)
+}
+
+// 检查点和对应扫描结果一起原子保存，不能单独推进日志位置
+pub fn write_checkpoint(
+    directory: &Path,
+    scopes: &[String],
+    scan: &ScanResult,
+    checkpoint: Option<crate::change_journal::Checkpoint>,
+) -> Result<(), String> {
     let _lock = WRITE_LOCK.lock().map_err(|error| error.to_string())?;
     fs::create_dir_all(directory).map_err(|error| error.to_string())?;
     let keys = scope_keys(scopes);
@@ -65,6 +78,7 @@ pub fn write(directory: &Path, scopes: &[String], scan: &ScanResult) -> Result<(
         scopes: keys.clone(),
         saved_at,
         scan: scan.clone(),
+        checkpoint,
     };
     let destination = cache_path(directory, &keys);
     let pending = destination.with_extension(format!("{}.tmp", std::process::id()));

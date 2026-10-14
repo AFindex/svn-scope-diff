@@ -433,7 +433,11 @@ export default function App() {
           setSelected(history.scan.changes[0]);
         }
       }
-      const result = await invoke<ScanResult>("scan_changes", { directories });
+      const opened = !preserveSelection
+        ? await invoke<{ scan: ScanResult; incremental: boolean; reason: string }>("open_scan", { directories })
+        : undefined;
+      const result = opened?.scan ?? await invoke<ScanResult>("scan_changes", { directories });
+      if (opened) setToast(opened.incremental ? opened.reason : `已完整核对：${opened.reason}`);
       setHistorySavedAt(undefined);
       activeScanDirectoryRef.current = scopeSetKey(result.scopeDirectories);
       scanRef.current = result;
@@ -571,6 +575,23 @@ export default function App() {
       setAutoRefreshBusy(false);
     }
   }, [refreshChangedPaths]);
+
+  useEffect(() => {
+    let running = false;
+    const timer = window.setInterval(async () => {
+      const current = scanRef.current;
+      if (running || !current || scanLoadingRef.current || svnUpdateRunningRef.current) return;
+      running = true;
+      try {
+        await invoke("checkpoint_history", { directories: current.scopeDirectories });
+      } catch {
+        // 历史维护失败保留原检查点，下次打开时核对或完整扫描
+      } finally {
+        running = false;
+      }
+    }, 30000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -1768,7 +1789,7 @@ export default function App() {
           <div className="content">
             {historySavedAt !== undefined && <div className="scan-banner history-banner" role="status">
               {scanLoading && <span className="spinner" />}
-              <span>已快速打开 {new Date(historySavedAt).toLocaleString()} 的历史列表；{scanLoading ? "正在后台核对最新变更，可先浏览，完成后可编辑。" : "最新状态尚未核对，请点击刷新变更重试。"}</span>
+              <span>已快速打开 {new Date(historySavedAt).toLocaleString()} 的历史列表；{scanLoading ? "正在增量核对，可先浏览；记录失效或 SVN 元数据变化时完整核对。" : "最新状态尚未核对，请点击刷新变更重试。"}</span>
             </div>}
             {scanError && <div className="scan-banner"><Icon name="warning" size={16} />{scanError}</div>}
             {autoRefreshError && <div className="scan-banner" role="alert">
