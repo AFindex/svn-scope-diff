@@ -1,7 +1,7 @@
 use crate::models::{WorkingCopyChanged, WorkingCopyWatchError, WorkingCopyWatcherStatus};
 use crate::watch_path_filter::WatchPathFilter;
 use crate::{path_scope, svn};
-use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{event::ModifyKind, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -179,6 +179,7 @@ fn event_loop(
 ) {
     let mut path_filter = WatchPathFilter::default();
     let mut pending: HashMap<String, PathBuf> = HashMap::new();
+    let mut rescans: HashMap<String, PathBuf> = HashMap::new();
     let mut deadline: Option<Instant> = None;
     let mut batch_started: Option<Instant> = None;
 
@@ -201,7 +202,7 @@ fn event_loop(
                 {
                     path_filter.clear();
                     for scope in &scopes {
-                        pending.insert(path_scope::path_key(scope), scope.clone());
+                        rescans.insert(path_scope::path_key(scope), scope.clone());
                     }
                 }
                 path_filter.invalidate_event(&event);
@@ -214,18 +215,18 @@ fn event_loop(
                     {
                         continue;
                     }
-                    // 忽略状态检查失败时仍交给原扫描处理并显示错误，不丢弃有效改动
-                    if path_filter.is_ignored(&path, &wc_root).unwrap_or(false) {
+                    // 子项事件已包含实际路径，目录时间戳变化不应扩大为递归扫描
+                    if is_directory_write(event.kind, &path) {
                         continue;
                     }
                     pending.insert(path_scope::path_key(&path), path);
                 }
-                if !pending.is_empty() {
+                if !pending.is_empty() || !rescans.is_empty() {
                     let now = Instant::now();
                     let started = *batch_started.get_or_insert(now);
                     deadline = Some(batch_deadline(started, now));
                     if now >= started + MAX_BATCH_DELAY {
-                        emit_pending(&app, watcher_id, &mut pending);
+                        emit_pending(&app, watcher_id, &mut pending, &mut rescans, &mut path_filter, &wc_root);
                         deadline = None;
                         batch_started = None;
                     }
@@ -234,7 +235,7 @@ fn event_loop(
             Ok(Err(error)) => {
                 path_filter.clear();
                 for scope in &scopes {
-                    pending.insert(path_scope::path_key(scope), scope.clone());
+                    rescans.insert(path_scope::path_key(scope), scope.clone());
                 }
                 deadline = Some(Instant::now() + DEBOUNCE_INTERVAL);
                 let _ = app.emit(
@@ -246,12 +247,12 @@ fn event_loop(
                 );
             }
             Err(RecvTimeoutError::Timeout) => {
-                emit_pending(&app, watcher_id, &mut pending);
+                emit_pending(&app, watcher_id, &mut pending, &mut rescans, &mut path_filter, &wc_root);
                 deadline = None;
                 batch_started = None;
             }
             Err(RecvTimeoutError::Disconnected) => {
-                emit_pending(&app, watcher_id, &mut pending);
+                emit_pending(&app, watcher_id, &mut pending, &mut rescans, &mut path_filter, &wc_root);
                 break;
             }
         }
@@ -262,16 +263,35 @@ fn batch_deadline(started: Instant, now: Instant) -> Instant {
     (now + DEBOUNCE_INTERVAL).min(started + MAX_BATCH_DELAY)
 }
 
-fn emit_pending(app: &AppHandle, watcher_id: u64, pending: &mut HashMap<String, PathBuf>) {
-    if pending.is_empty() {
+fn is_directory_write(kind: EventKind, path: &Path) -> bool {
+    matches!(kind, EventKind::Modify(ModifyKind::Any | ModifyKind::Data(_) | ModifyKind::Metadata(_)))
+        && path.is_dir()
+}
+
+fn emit_pending(
+    app: &AppHandle, watcher_id: u64, pending: &mut HashMap<String, PathBuf>,
+    rescans: &mut HashMap<String, PathBuf>, filter: &mut WatchPathFilter, wc_root: &Path,
+) {
+    if pending.is_empty() && rescans.is_empty() {
         return;
     }
+    // 先合并重复通知，再检查忽略状态；元数据核对走独立后台队列
     let mut paths: Vec<String> = pending
         .drain()
+        .filter(|(_, path)| !filter.is_ignored(path, wc_root).unwrap_or(false))
+        .filter_map(|(key, path)| {
+            if path.is_dir() {
+                rescans.insert(key, path);
+                None
+            } else {
+                Some((key, path))
+            }
+        })
         .map(|(_, path)| path.to_string_lossy().into_owned())
         .collect();
     paths.sort_by_cached_key(|path| path.to_lowercase());
-    let _ = app.emit(CHANGED_EVENT, WorkingCopyChanged { watcher_id, paths });
+    let rescan_paths = rescans.drain().map(|(_, path)| path.to_string_lossy().into_owned()).collect();
+    let _ = app.emit(CHANGED_EVENT, WorkingCopyChanged { watcher_id, paths, rescan_paths });
 }
 
 fn is_svn_admin_path(path: &Path) -> bool {
@@ -305,6 +325,24 @@ mod tests {
             batch_deadline(started, started + Duration::from_millis(1900)),
             started + MAX_BATCH_DELAY
         );
+    }
+
+    #[test]
+    fn directory_timestamp_notifications_do_not_expand_file_refreshes() {
+        use notify::event::{CreateKind, RemoveKind, RenameMode};
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        let file = root.join("source.cs");
+        fs::write(&file, "source\r\n").unwrap();
+        assert!(is_directory_write(EventKind::Modify(ModifyKind::Any), root));
+        assert!(!is_directory_write(EventKind::Modify(ModifyKind::Any), &file));
+        for kind in [
+            EventKind::Create(CreateKind::Any),
+            EventKind::Remove(RemoveKind::Any),
+            EventKind::Modify(ModifyKind::Name(RenameMode::Both)),
+        ] {
+            assert!(!is_directory_write(kind, root));
+        }
     }
 
     #[test]

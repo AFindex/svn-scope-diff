@@ -59,3 +59,45 @@ export function mergeScanPatch(current: readonly ChangeEntry[], patch: ScanPatch
     { sensitivity: "base" },
   ));
 }
+
+// 并行核对时保留后来启动的刷新结果，防止慢目录扫描恢复已提交的旧状态
+export class ScanPatchTracker {
+  private nextId = 0;
+  private active = new Set<number>();
+  private completed = new Map<number, ScanPatch>();
+
+  begin() {
+    const id = ++this.nextId;
+    this.active.add(id);
+    return id;
+  }
+
+  clear() {
+    this.active.clear();
+    this.completed.clear();
+  }
+
+  finish(id: number, patch: ScanPatch) {
+    if (!this.active.has(id)) return undefined;
+    let changes = patch.changes;
+    for (const [newerId, newer] of [...this.completed].sort(([left], [right]) => left - right)) {
+      if (newerId <= id) continue;
+      changes = mergeScanPatch(changes, {
+        roots: newer.roots,
+        changes: newer.changes.filter((change) => patchTouchesPath(patch, change.path)),
+      });
+    }
+    const updated = { ...patch, changes };
+    this.completed.set(id, updated);
+    this.cancel(id);
+    return updated;
+  }
+
+  cancel(id: number) {
+    this.active.delete(id);
+    const oldest = Math.min(...this.active);
+    for (const key of this.completed.keys()) {
+      if (key < oldest) this.completed.delete(key);
+    }
+  }
+}

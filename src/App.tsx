@@ -38,7 +38,7 @@ import type { ChangeItemAction } from "./changeItemActions";
 import { DiffCache, sameFingerprint } from "./diffCache";
 import { ScanRefreshQueue } from "./scanRefreshQueue";
 import { textDiffChanges } from "./textDiffFiles";
-import { mergeScanPatch, patchTouchesPath, refreshPathsForChanges, relativeChangePath } from "./scanPatch";
+import { ScanPatchTracker, mergeScanPatch, patchTouchesPath, refreshPathsForChanges, relativeChangePath } from "./scanPatch";
 import {
   ancestorDirectorySelectionKeys,
   expandCommitSelectionKeys,
@@ -244,6 +244,7 @@ export default function App() {
   const [watcherStatus, setWatcherStatus] = useState<WorkingCopyWatcherStatus>();
   const [watcherRestartCount, setWatcherRestartCount] = useState(0);
   const [autoRefreshBusy, setAutoRefreshBusy] = useState(false);
+  const [backgroundScanBusy, setBackgroundScanBusy] = useState(false);
   const [autoRefreshError, setAutoRefreshError] = useState<string>();
   const [partialScanLoading, setPartialScanLoading] = useState(false);
   const [scopeContextMenu, setScopeContextMenu] = useState<ScopeContextMenuState>();
@@ -263,6 +264,11 @@ export default function App() {
   const scanLoadingRef = useRef(false);
   const writingFileRef = useRef(false);
   const partialRefreshQueueRef = useRef(new ScanRefreshQueue());
+  const backgroundRefreshQueueRef = useRef(new ScanRefreshQueue());
+  const scanPatchTrackerRef = useRef(new ScanPatchTracker());
+  const pendingRescanPathsRef = useRef(new Map<string, string>());
+  const backgroundScanRunningRef = useRef(false);
+  const partialScanCountRef = useRef(0);
   const svnUpdateRunningRef = useRef(false);
   const pendingAutoRefreshPathsRef = useRef(new Map<string, string>());
   const autoRefreshRunningRef = useRef(false);
@@ -397,6 +403,8 @@ export default function App() {
     if (!preserveSelection && !discardDraft()) return undefined;
     scanLoadingRef.current = true;
     partialRefreshQueueRef.current.invalidate();
+    backgroundRefreshQueueRef.current.invalidate();
+    scanPatchTrackerRef.current.clear();
     bulkDiffRunRef.current += 1;
     bulkDiffRunningRef.current = false;
     setBulkDiffProgress(undefined);
@@ -410,6 +418,7 @@ export default function App() {
     setScanLoading(true);
     setScanError(undefined);
     setToast(undefined);
+    const scanId = scanPatchTrackerRef.current.begin();
     let restoredHistory = false;
     if (!preserveSelection) {
       setHistorySavedAt(undefined);
@@ -436,7 +445,10 @@ export default function App() {
       const opened = !preserveSelection
         ? await invoke<{ scan: ScanResult; incremental: boolean; reason: string }>("open_scan", { directories })
         : undefined;
-      const result = opened?.scan ?? await invoke<ScanResult>("scan_changes", { directories });
+      const scanned = opened?.scan ?? await invoke<ScanResult>("scan_changes", { directories });
+      const patch = scanPatchTrackerRef.current.finish(scanId, { roots: scanned.scopeDirectories, changes: scanned.changes });
+      if (!patch) return undefined;
+      const result = { ...scanned, changes: patch.changes };
       if (opened) setToast(opened.incremental ? opened.reason : `已完整核对：${opened.reason}`);
       setHistorySavedAt(undefined);
       activeScanDirectoryRef.current = scopeSetKey(result.scopeDirectories);
@@ -475,6 +487,7 @@ export default function App() {
       }
       return undefined;
     } finally {
+      scanPatchTrackerRef.current.cancel(scanId);
       scanLoadingRef.current = false;
       setScanLoading(false);
     }
@@ -515,13 +528,15 @@ export default function App() {
   }, []);
 
   const refreshChangedPaths = useCallback(async (
-    paths: string[], announce: boolean, priority = announce,
+    paths: string[], announce: boolean, priority = announce, background = false,
   ) => {
     const current = scanRef.current;
-    if (!current || !paths.length || scanLoadingRef.current || svnUpdateRunningRef.current) return undefined;
-    return partialRefreshQueueRef.current.run(async (isCurrent) => {
-      if (scanLoadingRef.current || svnUpdateRunningRef.current) return undefined;
-      if (announce) setPartialScanLoading(true);
+    if (!current || !paths.length || svnUpdateRunningRef.current) return undefined;
+    const queue = background ? backgroundRefreshQueueRef.current : partialRefreshQueueRef.current;
+    return queue.run(async (isCurrent) => {
+      if (svnUpdateRunningRef.current) return undefined;
+      const scanId = scanPatchTrackerRef.current.begin();
+      if (announce) { partialScanCountRef.current += 1; setPartialScanLoading(true); }
       try {
         const patch = await invoke<ScanPatch>("scan_changed_paths", {
           scopeDirectories: current.scopeDirectories,
@@ -530,9 +545,11 @@ export default function App() {
           wcRoot: current.wcRoot,
         });
         const latest = scanRef.current;
-        if (!isCurrent() || !latest || scanLoadingRef.current
+        if (!isCurrent() || !latest
           || scopeSetKey(latest.scopeDirectories) !== scopeSetKey(current.scopeDirectories)) return undefined;
-        const updated = applyScanPatch(patch);
+        const merged = scanPatchTrackerRef.current.finish(scanId, patch);
+        if (!merged) return undefined;
+        const updated = applyScanPatch(merged);
         setAutoRefreshError(undefined);
         if (announce && updated) setToast(`局部刷新完成：当前共 ${updated.changes.length} 项变更`);
         return updated;
@@ -543,36 +560,41 @@ export default function App() {
         else setAutoRefreshError(message);
         return undefined;
       } finally {
-        if (announce) setPartialScanLoading(false);
+        scanPatchTrackerRef.current.cancel(scanId);
+        if (announce) { partialScanCountRef.current -= 1; setPartialScanLoading(partialScanCountRef.current > 0); }
       }
     }, priority);
   }, [applyScanPatch]);
 
-  const flushAutoRefreshQueue = useCallback(async () => {
-    if (autoRefreshRunningRef.current) return;
-    autoRefreshRunningRef.current = true;
-    setAutoRefreshBusy(true);
+  const flushAutoRefreshQueue = useCallback(async (background = false) => {
+    const running = background ? backgroundScanRunningRef : autoRefreshRunningRef;
+    const pending = background ? pendingRescanPathsRef : pendingAutoRefreshPathsRef;
+    const setBusy = background ? setBackgroundScanBusy : setAutoRefreshBusy;
+    if (running.current) return;
+    running.current = true;
+    setBusy(true);
     try {
       while (
-        pendingAutoRefreshPathsRef.current.size
-        && !scanLoadingRef.current
+        pending.current.size
+        && (!background || !scanLoadingRef.current)
         && !svnUpdateRunningRef.current
       ) {
-        const paths = [...pendingAutoRefreshPathsRef.current.values()];
-        pendingAutoRefreshPathsRef.current.clear();
-        const updated = await refreshChangedPaths(paths, false);
+        // 文件逐项返回，目录核对独立运行，避免整批等待最慢的路径
+        const paths = [...pending.current.values()].slice(0, background ? pending.current.size : 1);
+        for (const path of paths) pending.current.delete(normalizedPath(path));
+        const updated = await refreshChangedPaths(paths, false, false, background);
         if (!updated) {
           for (const path of paths) {
             if (scanRef.current?.scopeDirectories.some((scope) => pathIsWithin(path, scope))) {
-              pendingAutoRefreshPathsRef.current.set(normalizedPath(path), path);
+              pending.current.set(normalizedPath(path), path);
             }
           }
           break;
         }
       }
     } finally {
-      autoRefreshRunningRef.current = false;
-      setAutoRefreshBusy(false);
+      running.current = false;
+      setBusy(false);
     }
   }, [refreshChangedPaths]);
 
@@ -580,7 +602,8 @@ export default function App() {
     let running = false;
     const timer = window.setInterval(async () => {
       const current = scanRef.current;
-      if (running || !current || scanLoadingRef.current || svnUpdateRunningRef.current) return;
+      if (running || !current || scanLoadingRef.current || svnUpdateRunningRef.current
+        || autoRefreshRunningRef.current || backgroundScanRunningRef.current || partialScanCountRef.current) return;
       running = true;
       try {
         await invoke("checkpoint_history", { directories: current.scopeDirectories });
@@ -596,6 +619,7 @@ export default function App() {
   useEffect(() => {
     const timer = window.setInterval(() => {
       if (pendingAutoRefreshPathsRef.current.size) void flushAutoRefreshQueue();
+      if (pendingRescanPathsRef.current.size) void flushAutoRefreshQueue(true);
     }, 3000);
     return () => window.clearInterval(timer);
   }, [flushAutoRefreshQueue]);
@@ -615,7 +639,11 @@ export default function App() {
           for (const path of event.payload.paths) {
             pendingAutoRefreshPathsRef.current.set(normalizedPath(path), path);
           }
+          for (const path of event.payload.rescanPaths ?? []) {
+            pendingRescanPathsRef.current.set(normalizedPath(path), path);
+          }
           void flushAutoRefreshQueue();
+          void flushAutoRefreshQueue(true);
         }),
         listen<WorkingCopyWatchError>("working-copy-watch-error", (event) => {
           if (event.payload.watcherId === watcherIdRef.current) {
@@ -691,6 +719,7 @@ export default function App() {
       watcherIdRef.current = null;
       setWatcherStatus(undefined);
       pendingAutoRefreshPathsRef.current.clear();
+      pendingRescanPathsRef.current.clear();
       void invoke<WorkingCopyWatcherStatus>("stop_working_copy_watcher").catch(() => undefined);
       return () => { active = false; };
     }
@@ -698,6 +727,7 @@ export default function App() {
     watcherIdRef.current = null;
     setWatcherStatus(undefined);
     pendingAutoRefreshPathsRef.current.clear();
+    pendingRescanPathsRef.current.clear();
     setAutoRefreshError(undefined);
     void invoke<WorkingCopyWatcherStatus>("start_working_copy_watcher", {
       directories: current.scopeDirectories,
@@ -1040,7 +1070,7 @@ export default function App() {
       diffCacheRef.current.clear();
       pendingFileUpdateRef.current = undefined;
       setPendingFileUpdate(undefined);
-      const updated = await refreshChangedPaths([change.path], false);
+      const updated = await refreshChangedPaths([change.path], false, true);
       const refreshedChange = updated?.changes.find(
         (candidate) => normalizedPath(candidate.path) === normalizedPath(change.path),
       );
@@ -1446,8 +1476,8 @@ export default function App() {
       return;
     }
     if (action === "refresh") {
-      if (scanLoading || partialScanLoading || svnUpdate.running) {
-        setToast("当前已有扫描或 SVN Update 正在运行，请稍后再刷新此项");
+      if (svnUpdate.running) {
+        setToast("SVN Update 正在运行，请结束后再刷新此项");
         return;
       }
       const refreshPaths = uniqueTargets.flatMap(
@@ -1718,7 +1748,7 @@ export default function App() {
               </div>
               <div className="scope-actions">
                 <span
-                  className={`scope-watch-status ${autoRefreshError ? "error" : autoRefreshBusy ? "busy" : ""}`}
+                  className={`scope-watch-status ${autoRefreshError ? "error" : autoRefreshBusy || backgroundScanBusy ? "busy" : ""}`}
                   title={autoRefreshError
                     ?? (watcherStatus?.watcherId
                       ? "文件保存后自动局部刷新 SVN 状态"
@@ -1729,6 +1759,8 @@ export default function App() {
                     ? "自动刷新异常"
                     : autoRefreshBusy || partialScanLoading
                       ? "局部刷新中"
+                      : backgroundScanBusy
+                        ? "后台核对目录（可刷新单项）"
                       : watcherStatus?.watcherId
                         ? "自动刷新"
                         : "启动监听…"}

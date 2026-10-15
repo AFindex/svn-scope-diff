@@ -13,6 +13,17 @@ const deferred = () => {
   return { promise, resolve };
 };
 
+test("连续两个显式刷新都能返回，不互相丢弃不同文件的结果", async () => {
+  const queue = new ScanRefreshQueue();
+  const gate = deferred();
+  const applied = [];
+  const first = queue.run(async (isCurrent) => { await gate.promise; if (isCurrent()) applied.push("a"); }, true);
+  await queue.run(async (isCurrent) => { if (isCurrent()) applied.push("b"); }, true);
+  gate.resolve();
+  await first;
+  assert.deepEqual(applied, ["b", "a"]);
+});
+
 test("提交刷新越过慢扫描，旧结果不能恢复已提交文件", async () => {
   const queue = new ScanRefreshQueue();
   const slow = deferred();

@@ -15,6 +15,7 @@ const {
   refreshTargetsForDirectory,
   refreshPathsForChanges,
   relativeChangePath,
+  ScanPatchTracker,
 } = await import(moduleUrl);
 
 function change(path, relativePath, item = "modified") {
@@ -30,6 +31,39 @@ function change(path, relativePath, item = "modified") {
     baseRevision: "1",
   };
 }
+
+test("后台目录晚返回时保留新文件与已提交文件的定点刷新", () => {
+  const tracker = new ScanPatchTracker();
+  const directory = tracker.begin();
+  const file = tracker.begin();
+  const newFile = change("F:\\wc\\new.cs", "new.cs");
+  const fresh = tracker.finish(file, { roots: ["F:\\wc\\new.cs", "F:\\wc\\committed.cs"], changes: [newFile] });
+  assert.deepEqual(fresh.changes, [newFile]);
+  const late = tracker.finish(directory, { roots: ["F:\\wc"], changes: [change("F:\\wc\\committed.cs", "committed.cs")] });
+  assert.deepEqual(late.changes, [newFile]);
+});
+
+test("交错返回按请求新旧合并，不把范围外文件并入旧补丁", () => {
+  const tracker = new ScanPatchTracker();
+  const older = tracker.begin();
+  const newer = tracker.begin();
+  const newest = tracker.begin();
+  tracker.finish(newest, { roots: ["F:\\wc\\a.cs"], changes: [] });
+  tracker.finish(newer, { roots: ["F:\\wc"], changes: [change("F:\\wc\\a.cs", "a.cs"), change("F:\\wc\\b.cs", "b.cs")] });
+  const result = tracker.finish(older, { roots: ["F:\\wc\\a.cs"], changes: [change("F:\\wc\\a.cs", "a.cs")] });
+  assert.deepEqual(result.changes, []);
+  assert.deepEqual(result.roots, ["F:\\wc\\a.cs"]);
+});
+
+test("切换范围和失败任务不留下待合并结果", () => {
+  const tracker = new ScanPatchTracker();
+  const old = tracker.begin();
+  tracker.clear();
+  assert.equal(tracker.finish(old, { roots: ["F:\\wc"], changes: [] }), undefined);
+  const failed = tracker.begin();
+  tracker.cancel(failed);
+  assert.equal(tracker.finish(failed, { roots: ["F:\\wc"], changes: [] }), undefined);
+});
 
 test("matches Windows path boundaries without matching sibling prefixes", () => {
   assert.equal(changePathIsWithin("F:\\wc\\src\\a.cs", "F:\\wc\\src"), true);
