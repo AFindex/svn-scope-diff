@@ -16,6 +16,7 @@ const {
   refreshPathsForChanges,
   relativeChangePath,
   ScanPatchTracker,
+  ScanVerification,
 } = await import(moduleUrl);
 
 function change(path, relativePath, item = "modified") {
@@ -121,4 +122,27 @@ test("已提交文件的空状态补丁移除旧条目但保留其他修改", ()
   assert.deepEqual(mergeScanPatch([committed, remaining], {
     roots: refreshPathsForChanges([committed.path], [committed, remaining]), changes: [],
   }), [remaining]);
+});
+
+
+test("历史文件核对只放行已核对目标，不放行父目录和其他文件", () => {
+  const verified = new ScanVerification();
+  verified.add({ roots: ["F:/wc/a.cs"], changes: [] });
+  assert.deepEqual(verified.pending(["f:/WC/a.cs", "F:/wc", "F:/wc/b.cs"]), ["F:/wc", "F:/wc/b.cs"]);
+  verified.add({ roots: ["F:/wc/src"], changes: [] });
+  assert.deepEqual(verified.pending(["F:/wc/src/a.cs", "F:/wc/src", "F:/wc/src-old/a.cs"]), ["F:/wc/src-old/a.cs"]);
+  verified.clear();
+  assert.deepEqual(verified.pending(["F:/wc/a.cs"]), ["F:/wc/a.cs"]);
+});
+
+test("慢全量核对未结束时可完成局部刷新与操作，旧结果不恢复已回退项", () => {
+  const tracker = new ScanPatchTracker();
+  const verified = new ScanVerification();
+  const fullScan = tracker.begin();
+  const file = change("F:/wc/a.cs", "a.cs");
+  const local = tracker.finish(tracker.begin(), { roots: [file.path], changes: [file] });
+  verified.add(local);
+  assert.deepEqual(verified.pending([file.path]), []);
+  tracker.finish(tracker.begin(), { roots: [file.path], changes: [] });
+  assert.deepEqual(tracker.finish(fullScan, { roots: ["F:/wc"], changes: [file] }).changes, []);
 });

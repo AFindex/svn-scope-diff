@@ -35,6 +35,7 @@ interface ChangesPanelProps {
   tortoiseSvn?: TortoiseSvnAvailability;
   commitLaunching: boolean;
   workspaceUpdating: boolean;
+  onRefreshVisible: (paths: string[]) => Promise<void>;
   textDiffCount: number;
   bulkDiffProgress?: {
     completed: number;
@@ -95,6 +96,7 @@ export function ChangesPanel({
   tortoiseSvn,
   commitLaunching,
   workspaceUpdating,
+  onRefreshVisible,
   textDiffCount,
   bulkDiffProgress,
   onSelect,
@@ -104,6 +106,7 @@ export function ChangesPanel({
   onUpdateAllTextDiffs,
   onItemAction,
 }: ChangesPanelProps) {
+  const [refreshing, setRefreshing] = useState(false);
   const [changeView, setChangeView] = useState<"tree" | "list">("tree");
   const [listSortKey, setListSortKey] = useState<ChangeListSortKey>("path");
   const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
@@ -312,6 +315,19 @@ export function ChangesPanel({
 
       <div className="list-filter-panel combined-filter-panel">
         <div className="list-filter-heading">
+          <button
+            type="button"
+            disabled={workspaceUpdating || refreshing || !visibleChanges.length}
+            title="优先核对筛选后的当前列表；目录项包含其子目录，完成后即可执行 SVN 操作"
+            onClick={async () => {
+              setRefreshing(true);
+              try { await onRefreshVisible(visibleChanges.map((change) => change.path)); }
+              finally { setRefreshing(false); }
+            }}
+          >
+            <Icon name="refresh" size={13} />
+            {refreshing ? "正在刷新…" : "刷新当前列表"}
+          </button>
           <span className="list-filter-title">
             <Icon name="filter" size={14} />
             组合筛选

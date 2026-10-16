@@ -34,11 +34,11 @@ import { ChangesPanel } from "./components/ChangesPanel";
 import { ChangeContextMenu } from "./components/ChangeContextMenu";
 import { DiffPane } from "./components/DiffPane";
 import { Icon } from "./components/Icons";
-import type { ChangeItemAction } from "./changeItemActions";
+import { currentActionTargets, type ChangeItemAction } from "./changeItemActions";
 import { DiffCache, sameFingerprint } from "./diffCache";
 import { ScanRefreshQueue } from "./scanRefreshQueue";
 import { textDiffChanges } from "./textDiffFiles";
-import { ScanPatchTracker, mergeScanPatch, patchTouchesPath, refreshPathsForChanges, relativeChangePath } from "./scanPatch";
+import { ScanVerification, ScanPatchTracker, mergeScanPatch, patchTouchesPath, refreshPathsForChanges, relativeChangePath } from "./scanPatch";
 import {
   ancestorDirectorySelectionKeys,
   expandCommitSelectionKeys,
@@ -266,6 +266,7 @@ export default function App() {
   const partialRefreshQueueRef = useRef(new ScanRefreshQueue());
   const backgroundRefreshQueueRef = useRef(new ScanRefreshQueue());
   const scanPatchTrackerRef = useRef(new ScanPatchTracker());
+  const scanVerificationRef = useRef(new ScanVerification());
   const pendingRescanPathsRef = useRef(new Map<string, string>());
   const backgroundScanRunningRef = useRef(false);
   const partialScanCountRef = useRef(0);
@@ -405,6 +406,7 @@ export default function App() {
     partialRefreshQueueRef.current.invalidate();
     backgroundRefreshQueueRef.current.invalidate();
     scanPatchTrackerRef.current.clear();
+    scanVerificationRef.current.clear();
     bulkDiffRunRef.current += 1;
     bulkDiffRunningRef.current = false;
     setBulkDiffProgress(undefined);
@@ -550,6 +552,7 @@ export default function App() {
         const merged = scanPatchTrackerRef.current.finish(scanId, patch);
         if (!merged) return undefined;
         const updated = applyScanPatch(merged);
+        scanVerificationRef.current.add(merged);
         setAutoRefreshError(undefined);
         if (announce && updated) setToast(`局部刷新完成：当前共 ${updated.changes.length} 项变更`);
         return updated;
@@ -565,6 +568,21 @@ export default function App() {
       }
     }, priority);
   }, [applyScanPatch]);
+
+  const ensurePathsVerified = useCallback(async (paths: string[]) => {
+    const current = scanRef.current;
+    if (!current || svnUpdateRunningRef.current) return undefined;
+    const pendingPaths = historySavedAt === undefined ? [] : scanVerificationRef.current.pending(paths);
+    if (pendingPaths.length) {
+      setToast(`正在优先核对 ${pendingPaths.length} 个操作目标…`);
+      if (!await refreshChangedPaths(pendingPaths, true, true)
+        || scanVerificationRef.current.pending(pendingPaths).length) return undefined;
+    }
+    const latest = scanRef.current;
+    if (!latest || svnUpdateRunningRef.current
+      || scopeSetKey(current.scopeDirectories) !== scopeSetKey(latest.scopeDirectories)) return undefined;
+    return latest;
+  }, [historySavedAt, refreshChangedPaths]);
 
   const flushAutoRefreshQueue = useCallback(async (background = false) => {
     const running = background ? backgroundScanRunningRef : autoRefreshRunningRef;
@@ -1029,7 +1047,6 @@ export default function App() {
   }, [discardDraft, storeDiffCache]);
 
   const revertSelectedDiff = useCallback(async (content: string, hunkCount: number) => {
-    if (historySavedAt !== undefined) { setToast("历史列表尚未核对完成，请刷新后再修改文件"); return; }
     const actionLabel = hunkCount ? `还原 ${hunkCount} 处差异` : "保存文件";
     const current = scanRef.current;
     const change = selectedRef.current;
@@ -1050,6 +1067,7 @@ export default function App() {
     setDiffReverting(true);
     setToast(undefined);
     try {
+      if (!await ensurePathsVerified([change.path])) return;
       const savedFingerprint = await invoke<FileFingerprint>("save_working_file_content", {
         path: change.path,
         expectedContent: currentDiff.modified,
@@ -1101,7 +1119,7 @@ export default function App() {
       writingFileRef.current = false;
       setDiffReverting(false);
     }
-  }, [changeDraft, diff, diffReverting, historySavedAt, refreshChangedPaths, storeDiffCache]);
+  }, [changeDraft, diff, diffReverting, ensurePathsVerified, refreshChangedPaths, storeDiffCache]);
 
   const updateAllTextDiffs = useCallback(async () => {
     if (svnUpdate.running) {
@@ -1426,7 +1444,6 @@ export default function App() {
   }, []);
 
   const launchTortoiseCommit = useCallback(async (paths: string[]) => {
-    if (historySavedAt !== undefined) { setToast("历史列表尚未核对完成，请刷新后再提交"); return; }
     if (!scan || !paths.length || commitLaunching || writingFileRef.current) return;
     if (draftRef.current !== undefined) { setToast("请先保存编辑，再提交工作文件"); return; }
     if (svnUpdate.running) {
@@ -1436,8 +1453,12 @@ export default function App() {
     setCommitLaunching(true);
     setToast(undefined);
     try {
+      const verified = await ensurePathsVerified(paths);
+      if (!verified) return;
+      const targets = currentActionTargets("commit", paths, verified.changes);
+      if (!targets.length) { setToast("核对完成，所选项已无可提交变更"); return; }
       const result = await invoke<CommitLaunchResult>("open_tortoise_svn_commit", {
-        paths,
+        paths: targets.map((target) => target.path),
         directory: scan.directory,
         wcRoot: scan.wcRoot,
       });
@@ -1449,7 +1470,7 @@ export default function App() {
     } finally {
       setCommitLaunching(false);
     }
-  }, [commitLaunching, historySavedAt, scan, svnUpdate.running]);
+  }, [commitLaunching, ensurePathsVerified, scan, svnUpdate.running]);
 
   const openTortoiseCommit = useCallback(async () => {
     await launchTortoiseCommit(commitChanges.map((change) => change.path));
@@ -1461,11 +1482,7 @@ export default function App() {
     targets: ChangeEntry[] = [change],
   ) => {
     if (!scan || writingFileRef.current) return;
-    if (historySavedAt !== undefined && ["commit", "revert", "resolve", "conflictEditor"].includes(action)) {
-      setToast("历史列表尚未核对完成，请刷新后再执行 SVN 写操作");
-      return;
-    }
-    const uniqueTargets = targets.filter((target, index) => (
+    let uniqueTargets = targets.filter((target, index) => (
       targets.findIndex(
         (candidate) => normalizedPath(candidate.path) === normalizedPath(target.path),
       ) === index
@@ -1517,6 +1534,14 @@ export default function App() {
         return;
       }
 
+      if (["revert", "resolve", "conflictEditor"].includes(action)) {
+        const verified = await ensurePathsVerified(uniqueTargets.map((target) => target.path));
+        if (!verified) return;
+        uniqueTargets = currentActionTargets(action, uniqueTargets.map((target) => target.path), verified.changes);
+        if (!uniqueTargets.length) { setToast("核对完成，所选项已无可执行此操作的变更"); return; }
+        change = uniqueTargets[0];
+      }
+
       if (uniqueTargets.length > 1 && (action === "revert" || action === "resolve")) {
         const message = await invoke<string>("open_tortoise_svn_batch_action", {
           action,
@@ -1544,7 +1569,7 @@ export default function App() {
   }, [
     launchTortoiseCommit,
     discardDraft,
-    historySavedAt,
+    ensurePathsVerified,
     partialScanLoading,
     refreshChangedPaths,
     removeScanDirectory,
@@ -1791,6 +1816,7 @@ export default function App() {
               tortoiseSvn={tortoiseSvn}
               commitLaunching={commitLaunching}
               workspaceUpdating={svnUpdate.running}
+              onRefreshVisible={async (paths) => { await refreshChangedPaths(paths, true, true); }}
               textDiffCount={eligibleTextChanges.length}
               bulkDiffProgress={bulkDiffProgress}
               onSelect={(change) => { if (!diffReverting && (change.path === selected?.path || discardDraft())) setSelected(change); }}
@@ -1827,7 +1853,7 @@ export default function App() {
           <div className="content">
             {historySavedAt !== undefined && <div className="scan-banner history-banner" role="status">
               {scanLoading && <span className="spinner" />}
-              <span>已快速打开 {new Date(historySavedAt).toLocaleString()} 的历史列表；{scanLoading ? "正在增量核对，可先浏览；记录失效或 SVN 元数据变化时完整核对。" : "最新状态尚未核对，请点击刷新变更重试。"}</span>
+              <span>已快速打开 {new Date(historySavedAt).toLocaleString()} 的历史列表；{scanLoading ? "后台核对中；可先刷新当前列表或右键刷新单项，已核对项可立即操作。" : "后台核对未完成；仍可优先刷新当前列表或单项后操作。"}</span>
             </div>}
             {scanError && <div className="scan-banner"><Icon name="warning" size={16} />{scanError}</div>}
             {autoRefreshError && <div className="scan-banner" role="alert">

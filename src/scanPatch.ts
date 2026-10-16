@@ -60,6 +60,21 @@ export function mergeScanPatch(current: readonly ChangeEntry[], patch: ScanPatch
   ));
 }
 
+// 历史列表按实际核对范围放行操作，文件核对不能代替整个目录核对
+export class ScanVerification {
+  private roots = new Set<string>();
+
+  clear() { this.roots.clear(); }
+
+  add(patch: ScanPatch) {
+    for (const root of patch.roots) this.roots.add(changePathKey(root));
+  }
+
+  pending(paths: string[]) {
+    return paths.filter((path) => ![...this.roots].some((root) => changePathIsWithin(path, root)));
+  }
+}
+
 // 并行核对时保留后来启动的刷新结果，防止慢目录扫描恢复已提交的旧状态
 export class ScanPatchTracker {
   private nextId = 0;

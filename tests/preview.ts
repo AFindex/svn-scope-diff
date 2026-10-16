@@ -72,7 +72,7 @@ mockIPC(async (command, args: any) => {
   if (command === "get_launch_directory") return directory;
   if (command === "read_scan_history") return previewMode ? { savedAt: Date.now() - 3600000, scan: scan() } : null;
   if (command === "open_scan") {
-    if (previewMode) await new Promise((resolve) => setTimeout(resolve, previewMode === "incremental" ? 1500 : 15000));
+    if (previewMode) await new Promise((resolve) => setTimeout(resolve, previewMode === "incremental" ? 1500 : previewMode === "slow" ? 300000 : 15000));
     if (previewMode === "fail") throw new Error("模拟 SVN 扫描失败");
     return { scan: { ...scan(), changes: previewMode ? changes.slice(0, 1) : changes },
       incremental: previewMode === "incremental", reason: previewMode === "incremental" ? "已按文件变更记录完成增量核对" : "历史缓存尚未建立增量检查点" };
