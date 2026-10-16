@@ -1465,7 +1465,6 @@ export default function App() {
       setToast("历史列表尚未核对完成，请刷新后再执行 SVN 写操作");
       return;
     }
-    if (draftRef.current !== undefined && ["revert", "resolve", "conflictEditor"].includes(action)) { setToast("请先保存或放弃当前编辑，再执行 SVN 操作"); return; }
     const uniqueTargets = targets.filter((target, index) => (
       targets.findIndex(
         (candidate) => normalizedPath(candidate.path) === normalizedPath(target.path),
@@ -1493,6 +1492,12 @@ export default function App() {
       setToast("SVN Update 进行中，请完成或取消后再执行此操作");
       return;
     }
+    const editedPath = selectedRef.current?.path;
+    const touchesDraft = editedPath && uniqueTargets.some((target) => target.isDirectory
+      ? pathIsWithin(editedPath, target.path)
+      : normalizedPath(editedPath) === normalizedPath(target.path));
+    if (touchesDraft && draftRef.current !== undefined
+      && ["revert", "resolve", "conflictEditor"].includes(action) && !discardDraft()) return;
     setToast(undefined);
     try {
       if (action === "copyRelativePath" || action === "copyFullPath") {
@@ -1538,6 +1543,7 @@ export default function App() {
     }
   }, [
     launchTortoiseCommit,
+    discardDraft,
     historySavedAt,
     partialScanLoading,
     refreshChangedPaths,

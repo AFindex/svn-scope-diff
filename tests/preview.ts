@@ -3,6 +3,7 @@ import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
 import { emit } from "@tauri-apps/api/event";
 const directory = "C:\\fixture";
 let modified = "class Player\r\n{\r\n    int health = 200;\r\n}\r\n";
+if (new URLSearchParams(location.search).has("mixed")) modified = modified.replace("{\r\n", "{\n");
 let original = modified.replace("200", "100");
 let revision = 1;
 let changes = [
@@ -89,6 +90,7 @@ mockIPC(async (command, args: any) => {
     changes: snapshot.filter((change) => args.paths.some((path: string) => change.path === path || change.path.startsWith(path + "\\"))).map((change) => ({ ...change })),
     };
   }
+  if (command === "open_tortoise_svn_action" || command === "open_tortoise_svn_batch_action") return `测试 SVN 操作已启动：${args.action}`;
   if (command === "get_file_fingerprint") return { exists: true, isDirectory: false, size: modified.length, modifiedNs: String(revision) };
   if (command === "get_file_diff") return { path: args.path, original: args.isDirectory ? "" : original, modified: args.isDirectory ? "" : modified, originalLabel: "BASE · r1", modifiedLabel: "工作副本", originalEncoding: "UTF-8", modifiedEncoding: "UTF-8", originalBytes: original.length, modifiedBytes: modified.length, isBinary: false, isDirectory: args.isDirectory, truncated: false, note: null };
   if (command === "save_working_file_content") { if (args.expectedContent !== modified) throw new Error("文件已在外部修改"); modified = args.content; revision++; return { exists: true, isDirectory: false, size: modified.length, modifiedNs: String(revision) }; }

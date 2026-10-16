@@ -6,6 +6,7 @@ import {
   isConflictedChange,
 } from "../changeItemActions";
 import { wrapSearchMatchIndex } from "../diffSearch";
+import { getEditorDraft } from "../editorDraft";
 import {
   effectiveDiffPalette,
   monacoThemeForPalette,
@@ -183,8 +184,8 @@ export function DiffPane({
   const actionRef = useRef({ save: () => {}, revert: () => {} });
   const contentListenerRef = useRef<{ dispose: () => void } | null>(null);
   const menuActionsRef = useRef<{ dispose: () => void }[]>([]);
-  const draftCallbackRef = useRef({ onDraftChange, modified: diff?.modified });
-  draftCallbackRef.current = { onDraftChange, modified: diff?.modified };
+  const draftCallbackRef = useRef({ onDraftChange, modified: diff?.modified, path: diff?.path });
+  draftCallbackRef.current = { onDraftChange, modified: diff?.modified, path: diff?.path };
   const [viewMode, setViewMode] = useState<DiffViewMode>("all");
   const [diffPalette, setDiffPalette] = useState<DiffPalette>(initialDiffPalette);
   const [diffCount, setDiffCount] = useState(0);
@@ -217,10 +218,12 @@ export function DiffPane({
     menuActionsRef.current.forEach((action) => action.dispose());
     menuActionsRef.current = [];
     const modifiedEditor = editor.getModifiedEditor();
+    const mountedPath = draftCallbackRef.current.path;
     contentListenerRef.current = modifiedEditor.onDidChangeModelContent(() => {
       const content = modifiedEditor.getValue();
       const callback = draftCallbackRef.current;
-      callback.onDraftChange(content === callback.modified ? undefined : content);
+      if (callback.path !== mountedPath) return;
+      callback.onDraftChange(getEditorDraft(content, callback.modified));
     });
     for (const [command, label] of [["undo", "撤销编辑"], ["redo", "重做编辑"]]) {
       menuActionsRef.current.push(modifiedEditor.addAction({
@@ -843,6 +846,7 @@ export function DiffPane({
             <div className="monaco-host">
               {diff.note && <div className="diff-note">{diff.note}</div>}
               <DiffEditor
+                key={diff.path}
                 original={diff.original}
                 modified={draftContent ?? diff.modified}
                 language={languageForPath(diff.path)}
