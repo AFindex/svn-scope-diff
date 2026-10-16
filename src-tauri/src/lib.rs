@@ -1,5 +1,7 @@
 mod beyond_compare;
+mod change_journal;
 mod client_update;
+mod history_refresh;
 mod models;
 mod path_scope;
 mod scan_history;
@@ -7,6 +9,7 @@ mod svn;
 mod svn_update;
 mod system_shell;
 mod tortoise_svn;
+mod watch_path_filter;
 mod working_copy_watcher;
 
 use models::{
@@ -59,15 +62,28 @@ async fn scan_changes(
         .ok()
         .map(|path| path.join("scan-history"));
     tauri::async_runtime::spawn_blocking(move || {
-        let result = svn::scan_scopes(&directories)?;
-        if let Some(directory) = cache_directory {
-            // 缓存不可写时仍正常返回扫描结果
-            let _ = scan_history::write(&directory, &directories, &result);
-        }
-        Ok(result)
+        history_refresh::full_scan(cache_directory.as_deref(), &directories)
     })
     .await
     .map_err(|error| format!("扫描任务异常结束：{error}"))?
+}
+
+#[tauri::command]
+async fn open_scan(
+    app: tauri::AppHandle,
+    directories: Vec<String>,
+) -> Result<history_refresh::OpenResult, String> {
+    use tauri::Manager;
+    let cache = app
+        .path()
+        .app_cache_dir()
+        .ok()
+        .map(|path| path.join("scan-history"));
+    tauri::async_runtime::spawn_blocking(move || {
+        history_refresh::open(cache.as_deref(), &directories)
+    })
+    .await
+    .map_err(|error| format!("历史增量核对异常：{error}"))?
 }
 
 #[tauri::command]
@@ -85,16 +101,56 @@ async fn read_scan_history(
 
 #[tauri::command]
 async fn scan_changed_paths(
+    app: tauri::AppHandle,
     scope_directories: Vec<String>,
     paths: Vec<String>,
     display_root: String,
     wc_root: String,
 ) -> Result<ScanPatch, String> {
+    use tauri::Manager;
+    let cache = app
+        .path()
+        .app_cache_dir()
+        .ok()
+        .map(|path| path.join("scan-history"));
     tauri::async_runtime::spawn_blocking(move || {
-        svn::scan_changed_paths(&scope_directories, &paths, &display_root, &wc_root)
+        let checkpoint = change_journal::checkpoint(std::path::Path::new(&display_root)).ok();
+        let patch = svn::scan_changed_paths(&scope_directories, &paths, &display_root, &wc_root)?;
+        // 元数据事件会扫描全部范围，此时可以安全更新整个历史及日志位置
+        if scope_directories.iter().all(|scope| {
+            patch.roots.iter().any(|root| {
+                path_scope::path_is_within(std::path::Path::new(scope), std::path::Path::new(root))
+            })
+        }) {
+            if let Some(cache) = cache {
+                if let Some(mut history) = scan_history::read(&cache, &scope_directories) {
+                    history.scan.changes = patch.changes.clone();
+                    let _ = scan_history::write_checkpoint(
+                        &cache,
+                        &scope_directories,
+                        &history.scan,
+                        checkpoint,
+                    );
+                }
+            }
+        }
+        Ok(patch)
     })
     .await
     .map_err(|error| format!("局部扫描任务异常结束：{error}"))?
+}
+
+#[tauri::command]
+async fn checkpoint_history(app: tauri::AppHandle, directories: Vec<String>) -> bool {
+    use tauri::Manager;
+    let Ok(cache) = app.path().app_cache_dir() else {
+        return false;
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        history_refresh::checkpoint(&cache.join("scan-history"), &directories)
+    })
+    .await
+    .unwrap_or(false)
 }
 
 #[tauri::command]
@@ -308,6 +364,8 @@ pub fn run() {
             get_launch_directory,
             scan_changes,
             read_scan_history,
+            open_scan,
+            checkpoint_history,
             scan_changed_paths,
             get_beyond_compare_availability,
             get_tortoise_svn_availability,

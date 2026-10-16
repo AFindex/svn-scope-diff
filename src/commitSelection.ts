@@ -14,7 +14,7 @@ export function isCommitPathWithin(path: string, directory: string) {
 }
 
 export function isCommitSelectable(change: ChangeEntry) {
-  return !(change.isDirectory && change.item === "unversioned");
+  return !change.contextOnly;
 }
 
 export function expandCommitSelectionKeys(

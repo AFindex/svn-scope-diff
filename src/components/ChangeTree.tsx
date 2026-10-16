@@ -229,7 +229,7 @@ export function ChangeTree({
             label={`选择提交 ${node.key}`}
             title={commitChanges.length
               ? `选择此项包含的 ${commitChanges.length} 个变更`
-              : "未版本化目录不会直接转交，避免 TortoiseSVN 递归加入未知文件"}
+              : "此项没有可提交的变更"}
             onChange={(checked) => onToggleCommitSelection(commitChanges, checked)}
           />
           <button

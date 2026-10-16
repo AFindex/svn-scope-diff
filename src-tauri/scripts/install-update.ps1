@@ -23,6 +23,9 @@ try {
     Move-Item -LiteralPath $pendingPath -Destination $Target -Force
     Start-Process -FilePath $Target -WorkingDirectory (Split-Path -Parent $Target) -WindowStyle Hidden
     'Update installed successfully' | Set-Content -LiteralPath $logPath
+    # Cleanup failure must not roll back an already started client
+    try { Remove-Item -LiteralPath $backupPath -Force }
+    catch { $_ | Out-String | Add-Content -LiteralPath $logPath -ErrorAction SilentlyContinue }
 } catch {
     $_ | Out-String | Set-Content -LiteralPath $logPath
     if ($didBackup) { Copy-Item -LiteralPath $backupPath -Destination $Target -Force }

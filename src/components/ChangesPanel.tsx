@@ -35,16 +35,11 @@ interface ChangesPanelProps {
   tortoiseSvn?: TortoiseSvnAvailability;
   commitLaunching: boolean;
   workspaceUpdating: boolean;
-  textDiffCount: number;
-  bulkDiffProgress?: {
-    completed: number;
-    total: number;
-  };
+  onRefreshVisible: (paths: string[]) => Promise<void>;
   onSelect: (change: ChangeEntry) => void;
   onToggleCommitSelection: (changes: ChangeEntry[], checked: boolean) => void;
   onClearCommitSelection: () => void;
   onCommitSelection: () => void;
-  onUpdateAllTextDiffs: () => void;
   onItemAction: (
     action: ChangeItemAction,
     change: ChangeEntry,
@@ -95,15 +90,14 @@ export function ChangesPanel({
   tortoiseSvn,
   commitLaunching,
   workspaceUpdating,
-  textDiffCount,
-  bulkDiffProgress,
+  onRefreshVisible,
   onSelect,
   onToggleCommitSelection,
   onClearCommitSelection,
   onCommitSelection,
-  onUpdateAllTextDiffs,
   onItemAction,
 }: ChangesPanelProps) {
+  const [refreshing, setRefreshing] = useState(false);
   const [changeView, setChangeView] = useState<"tree" | "list">("tree");
   const [listSortKey, setListSortKey] = useState<ChangeListSortKey>("path");
   const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
@@ -312,6 +306,20 @@ export function ChangesPanel({
 
       <div className="list-filter-panel combined-filter-panel">
         <div className="list-filter-heading">
+          <button
+            type="button"
+            className="list-refresh-button"
+            disabled={workspaceUpdating || refreshing || !visibleChanges.length}
+            title="优先核对当前筛选列表的 SVN 状态（新增、修改、删除等），不批量读取文本 Diff；目录项包含子目录，核对后即可 Revert 或提交"
+            onClick={async () => {
+              setRefreshing(true);
+              try { await onRefreshVisible(visibleChanges.map((change) => change.path)); }
+              finally { setRefreshing(false); }
+            }}
+          >
+            <Icon name="refresh" size={12} className={refreshing ? "rotating" : undefined} />
+            <span>{refreshing ? "正在刷新…" : "刷新当前列表"}</span>
+          </button>
           <span className="list-filter-title">
             <Icon name="filter" size={14} />
             组合筛选
@@ -432,39 +440,6 @@ export function ChangesPanel({
             <span>{commitNotice}</span>
           </div>
         )}
-      </div>
-
-      <div className="bulk-diff-toolbar">
-          <button
-            type="button"
-            className="bulk-diff-button"
-            disabled={!textDiffCount || Boolean(bulkDiffProgress) || workspaceUpdating}
-            title={workspaceUpdating
-              ? "SVN Update 进行中，结束后会自动重新扫描"
-              : textDiffCount
-              ? "更新全部白名单代码文本 Diff（.py、.cs、.bat、.ts、.cpp 等）"
-              : "当前修改中没有符合后缀白名单的代码文本文件"}
-            onClick={onUpdateAllTextDiffs}
-          >
-            <Icon
-              name="refresh"
-              size={14}
-              className={bulkDiffProgress ? "rotating" : undefined}
-            />
-            <span>{bulkDiffProgress ? "正在更新文本 Diff" : "更新全部文本 Diff"}</span>
-            <b aria-live="polite">
-              {bulkDiffProgress
-                ? `${bulkDiffProgress.completed}/${bulkDiffProgress.total}`
-                : textDiffCount}
-            </b>
-          </button>
-          {bulkDiffProgress && (
-            <progress
-              max={bulkDiffProgress.total}
-              value={bulkDiffProgress.completed}
-              aria-label={`正在更新文本 Diff：${bulkDiffProgress.completed}/${bulkDiffProgress.total}`}
-            />
-          )}
       </div>
 
       <div className="changes-scroll">

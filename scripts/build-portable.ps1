@@ -110,12 +110,32 @@ try {
     $stableUpdated = $true
 }
 catch {
-    Write-Warning 'The versioned build succeeded, but the stable portable folder is in use. Close SVN Scope and run the build again to refresh the registered path.'
+    throw 'Close SVN Scope, then run scripts/build-portable.ps1 -SkipBuild again. The fixed client path could not be updated.'
+}
+
+# 日常只保留固定目录中的新版；旧构建移入回收站，不再成为启动入口
+Add-Type -AssemblyName Microsoft.VisualBasic
+Get-ChildItem -LiteralPath $portableRoot | Where-Object {
+    $_.Name -match '^SVN Scope \d+\.\d+\.\d+$' -or
+    ($_.Name -match '^SVN-Scope-\d+\.\d+\.\d+-win-x64\.zip$' -and $_.FullName -ne $archive)
+} | ForEach-Object {
+    $oldPath = [IO.Path]::GetFullPath($_.FullName)
+    if ((Split-Path -Parent $oldPath) -ne $portableRoot -or ($_.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw "Refusing to clean an unexpected build path: $oldPath"
+    }
+    if ($_.PSIsContainer) {
+        [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory($oldPath, 'OnlyErrorDialogs', 'SendToRecycleBin')
+    } else {
+        [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile($oldPath, 'OnlyErrorDialogs', 'SendToRecycleBin')
+    }
+}
+if (Test-Path 'HKCU:\Software\Classes\Directory\shell\SvnScope') {
+    & (Join-Path $stableDirectory 'Register-ContextMenu.ps1')
 }
 
 Write-Host ''
 Write-Host 'Portable build ready:' -ForegroundColor Green
-Write-Host "  Folder: $portableDirectory"
+Write-Host "  Folder: $stableDirectory"
 Write-Host "  ZIP:    $archive"
 Write-Host "  SHA256: $hashValue"
 if ($stableUpdated) {

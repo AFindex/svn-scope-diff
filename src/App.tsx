@@ -34,10 +34,12 @@ import { ChangesPanel } from "./components/ChangesPanel";
 import { ChangeContextMenu } from "./components/ChangeContextMenu";
 import { DiffPane } from "./components/DiffPane";
 import { Icon } from "./components/Icons";
-import type { ChangeItemAction } from "./changeItemActions";
+import { currentActionTargets, type ChangeItemAction } from "./changeItemActions";
 import { DiffCache, sameFingerprint } from "./diffCache";
-import { textDiffChanges } from "./textDiffFiles";
-import { mergeScanPatch, patchTouchesPath, relativeChangePath } from "./scanPatch";
+import { ScanRefreshQueue } from "./scanRefreshQueue";
+import { TextDiffUpdate } from "./components/TextDiffUpdate";
+import { readTextDiffExtensions, saveTextDiffExtensions, textDiffChanges } from "./textDiffFiles";
+import { ScanVerification, ScanPatchTracker, mergeScanPatch, patchTouchesPath, refreshPathsForChanges, relativeChangePath } from "./scanPatch";
 import {
   ancestorDirectorySelectionKeys,
   expandCommitSelectionKeys,
@@ -243,6 +245,7 @@ export default function App() {
   const [watcherStatus, setWatcherStatus] = useState<WorkingCopyWatcherStatus>();
   const [watcherRestartCount, setWatcherRestartCount] = useState(0);
   const [autoRefreshBusy, setAutoRefreshBusy] = useState(false);
+  const [backgroundScanBusy, setBackgroundScanBusy] = useState(false);
   const [autoRefreshError, setAutoRefreshError] = useState<string>();
   const [partialScanLoading, setPartialScanLoading] = useState(false);
   const [scopeContextMenu, setScopeContextMenu] = useState<ScopeContextMenuState>();
@@ -261,8 +264,13 @@ export default function App() {
   const watcherIdRef = useRef<number | null>(null);
   const scanLoadingRef = useRef(false);
   const writingFileRef = useRef(false);
-  const scanGenerationRef = useRef(0);
-  const partialRefreshTailRef = useRef<Promise<void>>(Promise.resolve());
+  const partialRefreshQueueRef = useRef(new ScanRefreshQueue());
+  const backgroundRefreshQueueRef = useRef(new ScanRefreshQueue());
+  const scanPatchTrackerRef = useRef(new ScanPatchTracker());
+  const scanVerificationRef = useRef(new ScanVerification());
+  const pendingRescanPathsRef = useRef(new Map<string, string>());
+  const backgroundScanRunningRef = useRef(false);
+  const partialScanCountRef = useRef(0);
   const svnUpdateRunningRef = useRef(false);
   const pendingAutoRefreshPathsRef = useRef(new Map<string, string>());
   const autoRefreshRunningRef = useRef(false);
@@ -271,7 +279,12 @@ export default function App() {
     startX: number;
     startWidth: number;
   } | undefined>(undefined);
-  const eligibleTextChanges = useMemo(() => textDiffChanges(scan?.changes ?? []), [scan?.changes]);
+  const [textDiffExtensions, setTextDiffExtensions] = useState(readTextDiffExtensions);
+  const eligibleTextChanges = useMemo(() => textDiffChanges(scan?.changes ?? [], textDiffExtensions), [scan?.changes, textDiffExtensions]);
+  const changeTextDiffExtensions = useCallback((extensions: string[]) => {
+    setTextDiffExtensions(extensions);
+    saveTextDiffExtensions(extensions);
+  }, []);
   const commitChanges = useMemo(
     () => selectedCommitChanges(scan?.changes ?? [], commitSelection),
     [commitSelection, scan?.changes],
@@ -396,7 +409,10 @@ export default function App() {
     if (scanLoadingRef.current || writingFileRef.current) return undefined;
     if (!preserveSelection && !discardDraft()) return undefined;
     scanLoadingRef.current = true;
-    scanGenerationRef.current += 1;
+    partialRefreshQueueRef.current.invalidate();
+    backgroundRefreshQueueRef.current.invalidate();
+    scanPatchTrackerRef.current.clear();
+    scanVerificationRef.current.clear();
     bulkDiffRunRef.current += 1;
     bulkDiffRunningRef.current = false;
     setBulkDiffProgress(undefined);
@@ -410,6 +426,7 @@ export default function App() {
     setScanLoading(true);
     setScanError(undefined);
     setToast(undefined);
+    const scanId = scanPatchTrackerRef.current.begin();
     let restoredHistory = false;
     if (!preserveSelection) {
       setHistorySavedAt(undefined);
@@ -433,7 +450,14 @@ export default function App() {
           setSelected(history.scan.changes[0]);
         }
       }
-      const result = await invoke<ScanResult>("scan_changes", { directories });
+      const opened = !preserveSelection
+        ? await invoke<{ scan: ScanResult; incremental: boolean; reason: string }>("open_scan", { directories })
+        : undefined;
+      const scanned = opened?.scan ?? await invoke<ScanResult>("scan_changes", { directories });
+      const patch = scanPatchTrackerRef.current.finish(scanId, { roots: scanned.scopeDirectories, changes: scanned.changes });
+      if (!patch) return undefined;
+      const result = { ...scanned, changes: patch.changes };
+      if (opened) setToast(opened.incremental ? opened.reason : `已完整核对：${opened.reason}`);
       setHistorySavedAt(undefined);
       activeScanDirectoryRef.current = scopeSetKey(result.scopeDirectories);
       scanRef.current = result;
@@ -471,6 +495,7 @@ export default function App() {
       }
       return undefined;
     } finally {
+      scanPatchTrackerRef.current.cancel(scanId);
       scanLoadingRef.current = false;
       setScanLoading(false);
     }
@@ -510,76 +535,115 @@ export default function App() {
     return updated;
   }, []);
 
-  const refreshChangedPaths = useCallback(async (paths: string[], announce: boolean) => {
+  const refreshChangedPaths = useCallback(async (
+    paths: string[], announce: boolean, priority = announce, background = false,
+  ) => {
     const current = scanRef.current;
     if (!current || !paths.length || svnUpdateRunningRef.current) return undefined;
-    const generation = scanGenerationRef.current;
-    const previous = partialRefreshTailRef.current;
-    let release!: () => void;
-    partialRefreshTailRef.current = new Promise<void>((resolve) => { release = resolve; });
-    await previous;
-    if (generation !== scanGenerationRef.current || scanLoadingRef.current || svnUpdateRunningRef.current) { release(); return undefined; }
-    if (announce) setPartialScanLoading(true);
-    try {
-      const patch = await invoke<ScanPatch>("scan_changed_paths", {
-        scopeDirectories: current.scopeDirectories,
-        paths,
-        displayRoot: current.directory,
-        wcRoot: current.wcRoot,
-      });
-      const latest = scanRef.current;
-      if (generation !== scanGenerationRef.current || !latest || scopeSetKey(latest.scopeDirectories) !== scopeSetKey(current.scopeDirectories)) {
+    const queue = background ? backgroundRefreshQueueRef.current : partialRefreshQueueRef.current;
+    return queue.run(async (isCurrent) => {
+      if (svnUpdateRunningRef.current) return undefined;
+      const scanId = scanPatchTrackerRef.current.begin();
+      if (announce) { partialScanCountRef.current += 1; setPartialScanLoading(true); }
+      try {
+        const patch = await invoke<ScanPatch>("scan_changed_paths", {
+          scopeDirectories: current.scopeDirectories,
+          paths: refreshPathsForChanges(paths, current.changes),
+          displayRoot: current.directory,
+          wcRoot: current.wcRoot,
+        });
+        const latest = scanRef.current;
+        if (!isCurrent() || !latest
+          || scopeSetKey(latest.scopeDirectories) !== scopeSetKey(current.scopeDirectories)) return undefined;
+        const merged = scanPatchTrackerRef.current.finish(scanId, patch);
+        if (!merged) return undefined;
+        const updated = applyScanPatch(merged);
+        scanVerificationRef.current.add(merged);
+        setAutoRefreshError(undefined);
+        if (announce && updated) setToast(`局部刷新完成：当前共 ${updated.changes.length} 项变更`);
+        return updated;
+      } catch (error) {
+        if (!isCurrent()) return undefined;
+        const message = errorMessage(error);
+        if (announce) setToast(message);
+        else setAutoRefreshError(message);
         return undefined;
+      } finally {
+        scanPatchTrackerRef.current.cancel(scanId);
+        if (announce) { partialScanCountRef.current -= 1; setPartialScanLoading(partialScanCountRef.current > 0); }
       }
-      if (scanLoadingRef.current) return undefined;
-      const updated = applyScanPatch(patch);
-      setAutoRefreshError(undefined);
-      if (announce && updated) {
-        setToast(`局部刷新完成：当前共 ${updated.changes.length} 项变更`);
-      }
-      return updated;
-    } catch (error) {
-      const message = errorMessage(error);
-      if (announce) setToast(message);
-      else setAutoRefreshError(message);
-      return undefined;
-    } finally {
-      if (announce) setPartialScanLoading(false);
-      release();
-    }
+    }, priority);
   }, [applyScanPatch]);
 
-  const flushAutoRefreshQueue = useCallback(async () => {
-    if (autoRefreshRunningRef.current) return;
-    autoRefreshRunningRef.current = true;
-    setAutoRefreshBusy(true);
+  const ensurePathsVerified = useCallback(async (paths: string[]) => {
+    const current = scanRef.current;
+    if (!current || svnUpdateRunningRef.current) return undefined;
+    const pendingPaths = historySavedAt === undefined ? [] : scanVerificationRef.current.pending(paths);
+    if (pendingPaths.length) {
+      setToast(`正在优先核对 ${pendingPaths.length} 个操作目标…`);
+      if (!await refreshChangedPaths(pendingPaths, true, true)
+        || scanVerificationRef.current.pending(pendingPaths).length) return undefined;
+    }
+    const latest = scanRef.current;
+    if (!latest || svnUpdateRunningRef.current
+      || scopeSetKey(current.scopeDirectories) !== scopeSetKey(latest.scopeDirectories)) return undefined;
+    return latest;
+  }, [historySavedAt, refreshChangedPaths]);
+
+  const flushAutoRefreshQueue = useCallback(async (background = false) => {
+    const running = background ? backgroundScanRunningRef : autoRefreshRunningRef;
+    const pending = background ? pendingRescanPathsRef : pendingAutoRefreshPathsRef;
+    const setBusy = background ? setBackgroundScanBusy : setAutoRefreshBusy;
+    if (running.current) return;
+    running.current = true;
+    setBusy(true);
     try {
       while (
-        pendingAutoRefreshPathsRef.current.size
-        && !scanLoadingRef.current
+        pending.current.size
+        && (!background || !scanLoadingRef.current)
         && !svnUpdateRunningRef.current
       ) {
-        const paths = [...pendingAutoRefreshPathsRef.current.values()];
-        pendingAutoRefreshPathsRef.current.clear();
-        const updated = await refreshChangedPaths(paths, false);
+        // 文件逐项返回，目录核对独立运行，避免整批等待最慢的路径
+        const paths = [...pending.current.values()].slice(0, background ? pending.current.size : 1);
+        for (const path of paths) pending.current.delete(normalizedPath(path));
+        const updated = await refreshChangedPaths(paths, false, false, background);
         if (!updated) {
           for (const path of paths) {
             if (scanRef.current?.scopeDirectories.some((scope) => pathIsWithin(path, scope))) {
-              pendingAutoRefreshPathsRef.current.set(normalizedPath(path), path);
+              pending.current.set(normalizedPath(path), path);
             }
           }
           break;
         }
       }
     } finally {
-      autoRefreshRunningRef.current = false;
-      setAutoRefreshBusy(false);
+      running.current = false;
+      setBusy(false);
     }
   }, [refreshChangedPaths]);
 
   useEffect(() => {
+    let running = false;
+    const timer = window.setInterval(async () => {
+      const current = scanRef.current;
+      if (running || !current || scanLoadingRef.current || svnUpdateRunningRef.current
+        || autoRefreshRunningRef.current || backgroundScanRunningRef.current || partialScanCountRef.current) return;
+      running = true;
+      try {
+        await invoke("checkpoint_history", { directories: current.scopeDirectories });
+      } catch {
+        // 历史维护失败保留原检查点，下次打开时核对或完整扫描
+      } finally {
+        running = false;
+      }
+    }, 30000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
     const timer = window.setInterval(() => {
       if (pendingAutoRefreshPathsRef.current.size) void flushAutoRefreshQueue();
+      if (pendingRescanPathsRef.current.size) void flushAutoRefreshQueue(true);
     }, 3000);
     return () => window.clearInterval(timer);
   }, [flushAutoRefreshQueue]);
@@ -599,7 +663,11 @@ export default function App() {
           for (const path of event.payload.paths) {
             pendingAutoRefreshPathsRef.current.set(normalizedPath(path), path);
           }
+          for (const path of event.payload.rescanPaths ?? []) {
+            pendingRescanPathsRef.current.set(normalizedPath(path), path);
+          }
           void flushAutoRefreshQueue();
+          void flushAutoRefreshQueue(true);
         }),
         listen<WorkingCopyWatchError>("working-copy-watch-error", (event) => {
           if (event.payload.watcherId === watcherIdRef.current) {
@@ -640,8 +708,11 @@ export default function App() {
         : [];
       if (!relevantPaths.length) return;
       void (async () => {
-        const updated = await refreshChangedPaths(relevantPaths, false);
+        const updated = await refreshChangedPaths(relevantPaths, false, true);
         if (!active) return;
+        if (!updated) {
+          for (const path of relevantPaths) pendingAutoRefreshPathsRef.current.set(normalizedPath(path), path);
+        }
         const labels: Record<TortoiseOperationFinished["action"], string> = {
           commit: "提交",
           revert: "Revert",
@@ -672,6 +743,7 @@ export default function App() {
       watcherIdRef.current = null;
       setWatcherStatus(undefined);
       pendingAutoRefreshPathsRef.current.clear();
+      pendingRescanPathsRef.current.clear();
       void invoke<WorkingCopyWatcherStatus>("stop_working_copy_watcher").catch(() => undefined);
       return () => { active = false; };
     }
@@ -679,6 +751,7 @@ export default function App() {
     watcherIdRef.current = null;
     setWatcherStatus(undefined);
     pendingAutoRefreshPathsRef.current.clear();
+    pendingRescanPathsRef.current.clear();
     setAutoRefreshError(undefined);
     void invoke<WorkingCopyWatcherStatus>("start_working_copy_watcher", {
       directories: current.scopeDirectories,
@@ -878,6 +951,7 @@ export default function App() {
     storeDiffCache,
   ]);
 
+  // 局部刷新会重建 selected 对象，按文件路径保持检测计时器运行
   useEffect(() => {
     if (!selected || selected.isDirectory || !diff || svnUpdate.running) return;
     let active = true;
@@ -890,12 +964,13 @@ export default function App() {
       } catch {
         return;
       }
-      if (!active || writingFileRef.current || selectedRef.current?.path !== path) return;
+      const currentSelected = selectedRef.current;
+      if (!active || writingFileRef.current || !currentSelected || currentSelected.path !== path) return;
 
       const pending = pendingFileUpdateRef.current;
       if (pending?.path === path) {
         if (!sameFingerprint(pending.fingerprint, fingerprint)) {
-          requestFileReload(selected, fingerprint);
+          requestFileReload(currentSelected, fingerprint);
         }
         return;
       }
@@ -906,7 +981,7 @@ export default function App() {
         return;
       }
       if (!sameFingerprint(baseline.fingerprint, fingerprint)) {
-        requestFileReload(selected, fingerprint);
+        requestFileReload(currentSelected, fingerprint);
       }
     };
 
@@ -915,7 +990,7 @@ export default function App() {
       active = false;
       window.clearInterval(timer);
     };
-  }, [diff, requestFileReload, selected, svnUpdate.running]);
+  }, [diff?.path, requestFileReload, selected?.path, selected?.isDirectory, svnUpdate.running]);
 
   const keepCurrentDiff = useCallback(() => {
     const update = pendingFileUpdateRef.current;
@@ -978,7 +1053,6 @@ export default function App() {
   }, [discardDraft, storeDiffCache]);
 
   const revertSelectedDiff = useCallback(async (content: string, hunkCount: number) => {
-    if (historySavedAt !== undefined) { setToast("历史列表尚未核对完成，请刷新后再修改文件"); return; }
     const actionLabel = hunkCount ? `还原 ${hunkCount} 处差异` : "保存文件";
     const current = scanRef.current;
     const change = selectedRef.current;
@@ -999,6 +1073,7 @@ export default function App() {
     setDiffReverting(true);
     setToast(undefined);
     try {
+      if (!await ensurePathsVerified([change.path])) return;
       const savedFingerprint = await invoke<FileFingerprint>("save_working_file_content", {
         path: change.path,
         expectedContent: currentDiff.modified,
@@ -1019,7 +1094,7 @@ export default function App() {
       diffCacheRef.current.clear();
       pendingFileUpdateRef.current = undefined;
       setPendingFileUpdate(undefined);
-      const updated = await refreshChangedPaths([change.path], false);
+      const updated = await refreshChangedPaths([change.path], false, true);
       const refreshedChange = updated?.changes.find(
         (candidate) => normalizedPath(candidate.path) === normalizedPath(change.path),
       );
@@ -1050,7 +1125,7 @@ export default function App() {
       writingFileRef.current = false;
       setDiffReverting(false);
     }
-  }, [changeDraft, diff, diffReverting, historySavedAt, refreshChangedPaths, storeDiffCache]);
+  }, [changeDraft, diff, diffReverting, ensurePathsVerified, refreshChangedPaths, storeDiffCache]);
 
   const updateAllTextDiffs = useCallback(async () => {
     if (svnUpdate.running) {
@@ -1059,19 +1134,34 @@ export default function App() {
     }
     if (bulkDiffRunningRef.current) return;
     if (!eligibleTextChanges.length) {
-      setToast("当前修改中没有符合白名单的代码文本文件");
+      setToast("当前修改中没有符合所选格式的 SVN 文本变更");
       return;
     }
 
     const runId = bulkDiffRunRef.current + 1;
     bulkDiffRunRef.current = runId;
     bulkDiffRunningRef.current = true;
+    setBulkDiffProgress({ completed: 0, total: eligibleTextChanges.length });
+    const refreshed = await refreshChangedPaths(eligibleTextChanges.map((change) => change.path), true, true);
+    if (bulkDiffRunRef.current !== runId) return;
+    if (!refreshed) {
+      bulkDiffRunningRef.current = false;
+      setBulkDiffProgress(undefined);
+      return;
+    }
+    const currentTextChanges = textDiffChanges(refreshed.changes, textDiffExtensions);
+    if (!currentTextChanges.length) {
+      bulkDiffRunningRef.current = false;
+      setBulkDiffProgress(undefined);
+      setToast("已核对 SVN 状态，当前没有待更新的文本变更");
+      return;
+    }
     diffCacheRef.current.setLimit(Math.max(
       DIFF_CACHE_LIMIT,
-      eligibleTextChanges.length + DIFF_CACHE_LIMIT,
+      currentTextChanges.length + DIFF_CACHE_LIMIT,
     ));
     setToast(undefined);
-    setBulkDiffProgress({ completed: 0, total: eligibleTextChanges.length });
+    setBulkDiffProgress({ completed: 0, total: currentTextChanges.length });
 
     const counters: BulkDiffCounters = {
       completed: 0,
@@ -1090,12 +1180,12 @@ export default function App() {
       const now = Date.now();
       if (
         isCurrentRun()
-        && (counters.completed === eligibleTextChanges.length || now - lastProgressUpdate >= 100)
+        && (counters.completed === currentTextChanges.length || now - lastProgressUpdate >= 100)
       ) {
         lastProgressUpdate = now;
         setBulkDiffProgress({
           completed: counters.completed,
-          total: eligibleTextChanges.length,
+          total: currentTextChanges.length,
         });
       }
     };
@@ -1175,14 +1265,14 @@ export default function App() {
       while (isCurrentRun()) {
         const index = nextIndex;
         nextIndex += 1;
-        if (index >= eligibleTextChanges.length) return;
-        await processChange(eligibleTextChanges[index]);
+        if (index >= currentTextChanges.length) return;
+        await processChange(currentTextChanges[index]);
         if (!isCurrentRun()) return;
         finishOne();
       }
     };
 
-    const workerCount = Math.min(BULK_DIFF_CONCURRENCY, eligibleTextChanges.length);
+    const workerCount = Math.min(BULK_DIFF_CONCURRENCY, currentTextChanges.length);
     await Promise.all(Array.from({ length: workerCount }, () => worker()));
     if (!isCurrentRun()) return;
 
@@ -1195,8 +1285,8 @@ export default function App() {
     if (counters.changed) details.push(`变化中跳过 ${counters.changed}`);
     if (counters.binary) details.push(`二进制跳过 ${counters.binary}`);
     if (counters.failed) details.push(`失败 ${counters.failed}`);
-    setToast(`文本 Diff 更新完成：${details.join("，")}`);
-  }, [eligibleTextChanges, requestFileReload, storeDiffCache, svnUpdate.running]);
+    setToast(`SVN 文本 Diff 更新完成：${details.join("，")}`);
+  }, [eligibleTextChanges, textDiffExtensions, refreshChangedPaths, requestFileReload, storeDiffCache, svnUpdate.running]);
 
   const loadPropertyDiff = useCallback(() => {
     if (!selected || !["modified", "conflicted"].includes(selected.properties)) return;
@@ -1329,10 +1419,14 @@ export default function App() {
   }, []);
 
   const refresh = useCallback(async () => {
-    if (!scan?.scopeDirectories.length || scanLoading || svnUpdate.running || svnUpdateLaunching) return;
+    if (!scan?.scopeDirectories.length || scanLoading || partialScanLoading || svnUpdate.running || svnUpdateLaunching) return;
+    const currentSelected = selectedRef.current;
+    if (currentSelected && !currentSelected.isDirectory) {
+      await refreshChangedPaths([currentSelected.path], true, true);
+    }
     const result = await scanDirectory(scan.scopeDirectories, true);
     if (result) setToast(`已刷新当前目录：${result.changes.length} 项变更`);
-  }, [scan, scanDirectory, scanLoading, svnUpdate.running, svnUpdateLaunching]);
+  }, [partialScanLoading, refreshChangedPaths, scan, scanDirectory, scanLoading, svnUpdate.running, svnUpdateLaunching]);
 
   const toggleCommitSelection = useCallback((targets: ChangeEntry[], checked: boolean) => {
     if (!scan) return;
@@ -1356,7 +1450,6 @@ export default function App() {
   }, []);
 
   const launchTortoiseCommit = useCallback(async (paths: string[]) => {
-    if (historySavedAt !== undefined) { setToast("历史列表尚未核对完成，请刷新后再提交"); return; }
     if (!scan || !paths.length || commitLaunching || writingFileRef.current) return;
     if (draftRef.current !== undefined) { setToast("请先保存编辑，再提交工作文件"); return; }
     if (svnUpdate.running) {
@@ -1366,8 +1459,12 @@ export default function App() {
     setCommitLaunching(true);
     setToast(undefined);
     try {
+      const verified = await ensurePathsVerified(paths);
+      if (!verified) return;
+      const targets = currentActionTargets("commit", paths, verified.changes);
+      if (!targets.length) { setToast("核对完成，所选项已无可提交变更"); return; }
       const result = await invoke<CommitLaunchResult>("open_tortoise_svn_commit", {
-        paths,
+        paths: targets.map((target) => target.path),
         directory: scan.directory,
         wcRoot: scan.wcRoot,
       });
@@ -1379,7 +1476,7 @@ export default function App() {
     } finally {
       setCommitLaunching(false);
     }
-  }, [commitLaunching, historySavedAt, scan, svnUpdate.running]);
+  }, [commitLaunching, ensurePathsVerified, scan, svnUpdate.running]);
 
   const openTortoiseCommit = useCallback(async () => {
     await launchTortoiseCommit(commitChanges.map((change) => change.path));
@@ -1391,12 +1488,7 @@ export default function App() {
     targets: ChangeEntry[] = [change],
   ) => {
     if (!scan || writingFileRef.current) return;
-    if (historySavedAt !== undefined && ["commit", "revert", "resolve", "conflictEditor"].includes(action)) {
-      setToast("历史列表尚未核对完成，请刷新后再执行 SVN 写操作");
-      return;
-    }
-    if (draftRef.current !== undefined && ["revert", "resolve", "conflictEditor"].includes(action)) { setToast("请先保存或放弃当前编辑，再执行 SVN 操作"); return; }
-    const uniqueTargets = targets.filter((target, index) => (
+    let uniqueTargets = targets.filter((target, index) => (
       targets.findIndex(
         (candidate) => normalizedPath(candidate.path) === normalizedPath(target.path),
       ) === index
@@ -1406,8 +1498,8 @@ export default function App() {
       return;
     }
     if (action === "refresh") {
-      if (scanLoading || partialScanLoading || svnUpdate.running) {
-        setToast("当前已有扫描或 SVN Update 正在运行，请稍后再刷新此项");
+      if (svnUpdate.running) {
+        setToast("SVN Update 正在运行，请结束后再刷新此项");
         return;
       }
       const refreshPaths = uniqueTargets.flatMap(
@@ -1423,6 +1515,12 @@ export default function App() {
       setToast("SVN Update 进行中，请完成或取消后再执行此操作");
       return;
     }
+    const editedPath = selectedRef.current?.path;
+    const touchesDraft = editedPath && uniqueTargets.some((target) => target.isDirectory
+      ? pathIsWithin(editedPath, target.path)
+      : normalizedPath(editedPath) === normalizedPath(target.path));
+    if (touchesDraft && draftRef.current !== undefined
+      && ["revert", "resolve", "conflictEditor"].includes(action) && !discardDraft()) return;
     setToast(undefined);
     try {
       if (action === "copyRelativePath" || action === "copyFullPath") {
@@ -1440,6 +1538,14 @@ export default function App() {
       if (action === "commit") {
         await launchTortoiseCommit(uniqueTargets.map((target) => target.path));
         return;
+      }
+
+      if (["revert", "resolve", "conflictEditor"].includes(action)) {
+        const verified = await ensurePathsVerified(uniqueTargets.map((target) => target.path));
+        if (!verified) return;
+        uniqueTargets = currentActionTargets(action, uniqueTargets.map((target) => target.path), verified.changes);
+        if (!uniqueTargets.length) { setToast("核对完成，所选项已无可执行此操作的变更"); return; }
+        change = uniqueTargets[0];
       }
 
       if (uniqueTargets.length > 1 && (action === "revert" || action === "resolve")) {
@@ -1468,7 +1574,8 @@ export default function App() {
     }
   }, [
     launchTortoiseCommit,
-    historySavedAt,
+    discardDraft,
+    ensurePathsVerified,
     partialScanLoading,
     refreshChangedPaths,
     removeScanDirectory,
@@ -1536,6 +1643,15 @@ export default function App() {
           )}
         </div>
         <div className="top-actions">
+          <TextDiffUpdate
+            changes={scan?.changes ?? []}
+            extensions={textDiffExtensions}
+            count={eligibleTextChanges.length}
+            progress={bulkDiffProgress}
+            disabled={!scan || svnUpdate.running}
+            onExtensionsChange={changeTextDiffExtensions}
+            onUpdate={() => void updateAllTextDiffs()}
+          />
           <ClientUpdate disabled={draftContent !== undefined || diffReverting || svnUpdate.running || scanLoading} />
           <select aria-label="最近打开的文件夹" className="recent-directories" value="" disabled={scanLoading || svnUpdate.running || diffReverting} onChange={(event) => { if (event.target.value) void scanDirectory(event.target.value); }}>
             <option value="">最近目录</option>
@@ -1555,7 +1671,7 @@ export default function App() {
             type="button"
             className="toolbar-button refresh-toolbar-button"
             onClick={() => void refresh()}
-            disabled={!scan || scanLoading || svnUpdate.running || svnUpdateLaunching}
+            disabled={!scan || scanLoading || partialScanLoading || svnUpdate.running || svnUpdateLaunching}
             title={svnUpdate.running
               ? "SVN Update 结束后会自动刷新"
               : "重新扫描当前打开目录的本地变更 (Ctrl+R)"}
@@ -1678,7 +1794,7 @@ export default function App() {
               </div>
               <div className="scope-actions">
                 <span
-                  className={`scope-watch-status ${autoRefreshError ? "error" : autoRefreshBusy ? "busy" : ""}`}
+                  className={`scope-watch-status ${autoRefreshError ? "error" : autoRefreshBusy || backgroundScanBusy ? "busy" : ""}`}
                   title={autoRefreshError
                     ?? (watcherStatus?.watcherId
                       ? "文件保存后自动局部刷新 SVN 状态"
@@ -1689,6 +1805,8 @@ export default function App() {
                     ? "自动刷新异常"
                     : autoRefreshBusy || partialScanLoading
                       ? "局部刷新中"
+                      : backgroundScanBusy
+                        ? "后台核对目录（可刷新单项）"
                       : watcherStatus?.watcherId
                         ? "自动刷新"
                         : "启动监听…"}
@@ -1713,13 +1831,11 @@ export default function App() {
               tortoiseSvn={tortoiseSvn}
               commitLaunching={commitLaunching}
               workspaceUpdating={svnUpdate.running}
-              textDiffCount={eligibleTextChanges.length}
-              bulkDiffProgress={bulkDiffProgress}
+              onRefreshVisible={async (paths) => { await refreshChangedPaths(paths, true, true); }}
               onSelect={(change) => { if (!diffReverting && (change.path === selected?.path || discardDraft())) setSelected(change); }}
               onToggleCommitSelection={toggleCommitSelection}
               onClearCommitSelection={clearCommitSelection}
               onCommitSelection={() => void openTortoiseCommit()}
-              onUpdateAllTextDiffs={() => void updateAllTextDiffs()}
               onItemAction={(action, change, targets) => void handleItemAction(action, change, targets)}
             />
           </aside>
@@ -1749,7 +1865,7 @@ export default function App() {
           <div className="content">
             {historySavedAt !== undefined && <div className="scan-banner history-banner" role="status">
               {scanLoading && <span className="spinner" />}
-              <span>已快速打开 {new Date(historySavedAt).toLocaleString()} 的历史列表；{scanLoading ? "正在后台核对最新变更，可先浏览，完成后可编辑。" : "最新状态尚未核对，请点击刷新变更重试。"}</span>
+              <span>已快速打开 {new Date(historySavedAt).toLocaleString()} 的历史列表；{scanLoading ? "后台核对中；可先刷新当前列表或右键刷新单项，已核对项可立即操作。" : "后台核对未完成；仍可优先刷新当前列表或单项后操作。"}</span>
             </div>}
             {scanError && <div className="scan-banner"><Icon name="warning" size={16} />{scanError}</div>}
             {autoRefreshError && <div className="scan-banner" role="alert">

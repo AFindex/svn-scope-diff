@@ -24,6 +24,20 @@ export interface ChangeActionCapabilities {
   canResolve: boolean;
 }
 
+// 局部核对后只把仍满足操作条件的最新条目交给 SVN
+export function currentActionTargets(action: ChangeItemAction, paths: string[], changes: ChangeEntry[]) {
+  const pathKeys = new Set(paths.map((path) => path.replaceAll("/", "\\").toLocaleLowerCase()));
+  return changes.filter((change) => {
+    if (!pathKeys.has(change.path.replaceAll("/", "\\").toLocaleLowerCase())) return false;
+    const capabilities = changeActionCapabilities(change, true);
+    if (action === "commit") return capabilities.canCommit;
+    if (action === "revert") return capabilities.canRevert;
+    if (action === "resolve") return capabilities.canResolve;
+    if (action === "conflictEditor") return capabilities.canConflictEditor;
+    return true;
+  });
+}
+
 export function isConflictedChange(change: ChangeEntry) {
   return change.statusCode === "C"
     || change.item === "conflicted"
@@ -64,7 +78,6 @@ export function changeActionCapabilities(
     canOpen: !["deleted", "missing"].includes(change.item),
     canCommit: tortoiseAvailable
       && !change.contextOnly
-      && !(change.item === "unversioned" && change.isDirectory)
       && !conflicted,
     canRevert: tortoiseAvailable && versioned && !change.contextOnly,
     canBlame: tortoiseAvailable && !change.isDirectory && canBlameWorkingFile,

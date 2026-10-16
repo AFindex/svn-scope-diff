@@ -98,6 +98,7 @@ pub struct WorkingCopyWatcherStatus {
 pub struct WorkingCopyChanged {
     pub watcher_id: u64,
     pub paths: Vec<String>,
+    pub rescan_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

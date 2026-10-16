@@ -10,6 +10,7 @@ const { code: compiled } = await transformWithOxc(source, sourcePath);
 const moduleUrl = `data:text/javascript;base64,${Buffer.from(compiled).toString("base64")}`;
 const {
   changeActionCapabilities,
+  currentActionTargets,
   conflictLabel,
   countConflictBlocks,
   isConflictedChange,
@@ -61,7 +62,7 @@ test("only enables actions that make sense for the selected SVN item", () => {
   });
   assert.deepEqual(changeActionCapabilities(unversionedDirectory, true), {
     canOpen: true,
-    canCommit: false,
+    canCommit: true,
     canRevert: false,
     canBlame: false,
     canShowLog: false,
@@ -92,4 +93,18 @@ test("counts text conflict blocks from working-copy markers", () => {
   ].join("\n");
   assert.equal(countConflictBlocks(content), 2);
   assert.equal(countConflictBlocks("const marker = '<<<<<<<';"), 0);
+});
+
+
+test("操作使用核对后的状态，移除干净项及不再满足条件的目标", () => {
+  const edited = change();
+  const missing = edited.path + ".clean";
+  const unversioned = change({ path: edited.path + ".new", item: "unversioned", baseRevision: null });
+  const conflict = change({ path: edited.path + ".conflict", item: "conflicted" });
+  const paths = [edited.path.toUpperCase(), missing, unversioned.path, conflict.path];
+  const latest = [edited, unversioned, conflict];
+  assert.deepEqual(currentActionTargets("revert", paths, latest), [edited, conflict]);
+  assert.deepEqual(currentActionTargets("commit", paths, latest), [edited, unversioned]);
+  assert.deepEqual(currentActionTargets("resolve", paths, latest), [conflict]);
+  assert.deepEqual(currentActionTargets("revert", [missing], latest), []);
 });

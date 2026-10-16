@@ -74,6 +74,7 @@ export interface WorkingCopyWatcherStatus {
 export interface WorkingCopyChanged {
   watcherId: number;
   paths: string[];
+  rescanPaths?: string[];
 }
 
 export interface WorkingCopyWatchError {
