@@ -37,7 +37,8 @@ import { Icon } from "./components/Icons";
 import { currentActionTargets, type ChangeItemAction } from "./changeItemActions";
 import { DiffCache, sameFingerprint } from "./diffCache";
 import { ScanRefreshQueue } from "./scanRefreshQueue";
-import { textDiffChanges } from "./textDiffFiles";
+import { TextDiffUpdate } from "./components/TextDiffUpdate";
+import { readTextDiffExtensions, saveTextDiffExtensions, textDiffChanges } from "./textDiffFiles";
 import { ScanVerification, ScanPatchTracker, mergeScanPatch, patchTouchesPath, refreshPathsForChanges, relativeChangePath } from "./scanPatch";
 import {
   ancestorDirectorySelectionKeys,
@@ -278,7 +279,12 @@ export default function App() {
     startX: number;
     startWidth: number;
   } | undefined>(undefined);
-  const eligibleTextChanges = useMemo(() => textDiffChanges(scan?.changes ?? []), [scan?.changes]);
+  const [textDiffExtensions, setTextDiffExtensions] = useState(readTextDiffExtensions);
+  const eligibleTextChanges = useMemo(() => textDiffChanges(scan?.changes ?? [], textDiffExtensions), [scan?.changes, textDiffExtensions]);
+  const changeTextDiffExtensions = useCallback((extensions: string[]) => {
+    setTextDiffExtensions(extensions);
+    saveTextDiffExtensions(extensions);
+  }, []);
   const commitChanges = useMemo(
     () => selectedCommitChanges(scan?.changes ?? [], commitSelection),
     [commitSelection, scan?.changes],
@@ -1128,7 +1134,7 @@ export default function App() {
     }
     if (bulkDiffRunningRef.current) return;
     if (!eligibleTextChanges.length) {
-      setToast("当前修改中没有符合白名单的代码文本文件");
+      setToast("当前修改中没有符合所选格式的 SVN 文本变更");
       return;
     }
 
@@ -1143,7 +1149,7 @@ export default function App() {
       setBulkDiffProgress(undefined);
       return;
     }
-    const currentTextChanges = textDiffChanges(refreshed.changes);
+    const currentTextChanges = textDiffChanges(refreshed.changes, textDiffExtensions);
     if (!currentTextChanges.length) {
       bulkDiffRunningRef.current = false;
       setBulkDiffProgress(undefined);
@@ -1279,8 +1285,8 @@ export default function App() {
     if (counters.changed) details.push(`变化中跳过 ${counters.changed}`);
     if (counters.binary) details.push(`二进制跳过 ${counters.binary}`);
     if (counters.failed) details.push(`失败 ${counters.failed}`);
-    setToast(`文本 Diff 更新完成：${details.join("，")}`);
-  }, [eligibleTextChanges, refreshChangedPaths, requestFileReload, storeDiffCache, svnUpdate.running]);
+    setToast(`SVN 文本 Diff 更新完成：${details.join("，")}`);
+  }, [eligibleTextChanges, textDiffExtensions, refreshChangedPaths, requestFileReload, storeDiffCache, svnUpdate.running]);
 
   const loadPropertyDiff = useCallback(() => {
     if (!selected || !["modified", "conflicted"].includes(selected.properties)) return;
@@ -1637,6 +1643,15 @@ export default function App() {
           )}
         </div>
         <div className="top-actions">
+          <TextDiffUpdate
+            changes={scan?.changes ?? []}
+            extensions={textDiffExtensions}
+            count={eligibleTextChanges.length}
+            progress={bulkDiffProgress}
+            disabled={!scan || svnUpdate.running}
+            onExtensionsChange={changeTextDiffExtensions}
+            onUpdate={() => void updateAllTextDiffs()}
+          />
           <ClientUpdate disabled={draftContent !== undefined || diffReverting || svnUpdate.running || scanLoading} />
           <select aria-label="最近打开的文件夹" className="recent-directories" value="" disabled={scanLoading || svnUpdate.running || diffReverting} onChange={(event) => { if (event.target.value) void scanDirectory(event.target.value); }}>
             <option value="">最近目录</option>
@@ -1817,13 +1832,10 @@ export default function App() {
               commitLaunching={commitLaunching}
               workspaceUpdating={svnUpdate.running}
               onRefreshVisible={async (paths) => { await refreshChangedPaths(paths, true, true); }}
-              textDiffCount={eligibleTextChanges.length}
-              bulkDiffProgress={bulkDiffProgress}
               onSelect={(change) => { if (!diffReverting && (change.path === selected?.path || discardDraft())) setSelected(change); }}
               onToggleCommitSelection={toggleCommitSelection}
               onClearCommitSelection={clearCommitSelection}
               onCommitSelection={() => void openTortoiseCommit()}
-              onUpdateAllTextDiffs={() => void updateAllTextDiffs()}
               onItemAction={(action, change, targets) => void handleItemAction(action, change, targets)}
             />
           </aside>

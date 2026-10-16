@@ -617,11 +617,6 @@ button:disabled {
   padding: 0 10px 7px;
 }
 
-.bulk-diff-toolbar {
-  position: relative;
-  padding: 0 10px 8px;
-}
-
 .bulk-diff-button {
   display: flex;
   width: 100%;
@@ -670,29 +665,6 @@ button:disabled {
 .bulk-diff-button:focus-visible {
   border-color: #9bb0ea;
   box-shadow: 0 0 0 2px #dce5ff;
-}
-
-.bulk-diff-toolbar progress {
-  position: absolute;
-  right: 15px;
-  bottom: 8px;
-  left: 15px;
-  width: calc(100% - 30px);
-  height: 2px;
-  overflow: hidden;
-  border: 0;
-  border-radius: 999px;
-  background: transparent;
-  appearance: none;
-}
-
-.bulk-diff-toolbar progress::-webkit-progress-bar {
-  background: transparent;
-}
-
-.bulk-diff-toolbar progress::-webkit-progress-value {
-  border-radius: 999px;
-  background: #5879dc;
 }
 
 .change-view-switch {
@@ -3361,4 +3333,74 @@ button:disabled {
   gap: 4px;
   font-family: inherit;
   white-space: nowrap;
+}
+
+.text-diff-update {
+  position: relative;
+}
+
+.text-diff-update-panel {
+  position: absolute;
+  z-index: 100;
+  top: calc(100% + 8px);
+  right: 0;
+  width: 350px;
+  max-height: calc(100vh - 85px);
+  overflow-y: auto;
+  padding: 12px;
+  color: #444c58;
+  border: 1px solid #cdd5e3;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 12px 30px #25365728, 0 3px 8px #25365718;
+  font-size: 12px;
+  white-space: normal;
+}
+
+.text-diff-update-panel p {
+  margin: 8px 0 10px;
+  color: #737c8a;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.text-diff-update-panel fieldset {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 1px solid #e5e8ee;
+  border-radius: 6px;
+}
+
+.text-diff-update-panel .type-filter-options {
+  max-height: 210px;
+}
+
+.text-diff-custom-format {
+  display: flex;
+  gap: 4px;
+  padding: 8px;
+  border-top: 1px solid #e5e8ee;
+}
+
+.text-diff-custom-format input {
+  min-width: 0;
+  flex: 1;
+  padding: 0 7px;
+  border: 1px solid #d8dce3;
+  border-radius: 5px;
+  color: #444c58;
+  font: inherit;
+  font-size: 11px;
+}
+
+.text-diff-update-footer {
+  display: grid;
+  gap: 8px;
+  padding-top: 10px;
+}
+
+.text-diff-update-footer > span {
+  color: #737c8a;
+  font-size: 10px;
 }

@@ -36,16 +36,10 @@ interface ChangesPanelProps {
   commitLaunching: boolean;
   workspaceUpdating: boolean;
   onRefreshVisible: (paths: string[]) => Promise<void>;
-  textDiffCount: number;
-  bulkDiffProgress?: {
-    completed: number;
-    total: number;
-  };
   onSelect: (change: ChangeEntry) => void;
   onToggleCommitSelection: (changes: ChangeEntry[], checked: boolean) => void;
   onClearCommitSelection: () => void;
   onCommitSelection: () => void;
-  onUpdateAllTextDiffs: () => void;
   onItemAction: (
     action: ChangeItemAction,
     change: ChangeEntry,
@@ -97,13 +91,10 @@ export function ChangesPanel({
   commitLaunching,
   workspaceUpdating,
   onRefreshVisible,
-  textDiffCount,
-  bulkDiffProgress,
   onSelect,
   onToggleCommitSelection,
   onClearCommitSelection,
   onCommitSelection,
-  onUpdateAllTextDiffs,
   onItemAction,
 }: ChangesPanelProps) {
   const [refreshing, setRefreshing] = useState(false);
@@ -449,39 +440,6 @@ export function ChangesPanel({
             <span>{commitNotice}</span>
           </div>
         )}
-      </div>
-
-      <div className="bulk-diff-toolbar">
-          <button
-            type="button"
-            className="bulk-diff-button"
-            disabled={!textDiffCount || Boolean(bulkDiffProgress) || workspaceUpdating}
-            title={workspaceUpdating
-              ? "SVN Update 进行中，结束后会自动重新扫描"
-              : textDiffCount
-              ? "忽略当前列表筛选，核对所有支持的文本变更状态并更新 Diff 缓存（.cs、.ts、.py 等）；适合集中浏览代码差异"
-              : "当前修改中没有符合后缀白名单的代码文本文件"}
-            onClick={onUpdateAllTextDiffs}
-          >
-            <Icon
-              name="refresh"
-              size={14}
-              className={bulkDiffProgress ? "rotating" : undefined}
-            />
-            <span>{bulkDiffProgress ? "正在更新文本 Diff" : "更新全部文本 Diff"}</span>
-            <b aria-live="polite">
-              {bulkDiffProgress
-                ? `${bulkDiffProgress.completed}/${bulkDiffProgress.total}`
-                : textDiffCount}
-            </b>
-          </button>
-          {bulkDiffProgress && (
-            <progress
-              max={bulkDiffProgress.total}
-              value={bulkDiffProgress.completed}
-              aria-label={`正在更新文本 Diff：${bulkDiffProgress.completed}/${bulkDiffProgress.total}`}
-            />
-          )}
       </div>
 
       <div className="changes-scroll">
