@@ -317,16 +317,17 @@ export function ChangesPanel({
         <div className="list-filter-heading">
           <button
             type="button"
+            className="list-refresh-button"
             disabled={workspaceUpdating || refreshing || !visibleChanges.length}
-            title="优先核对筛选后的当前列表；目录项包含其子目录，完成后即可执行 SVN 操作"
+            title="优先核对当前筛选列表的 SVN 状态（新增、修改、删除等），不批量读取文本 Diff；目录项包含子目录，核对后即可 Revert 或提交"
             onClick={async () => {
               setRefreshing(true);
               try { await onRefreshVisible(visibleChanges.map((change) => change.path)); }
               finally { setRefreshing(false); }
             }}
           >
-            <Icon name="refresh" size={13} />
-            {refreshing ? "正在刷新…" : "刷新当前列表"}
+            <Icon name="refresh" size={12} className={refreshing ? "rotating" : undefined} />
+            <span>{refreshing ? "正在刷新…" : "刷新当前列表"}</span>
           </button>
           <span className="list-filter-title">
             <Icon name="filter" size={14} />
@@ -458,7 +459,7 @@ export function ChangesPanel({
             title={workspaceUpdating
               ? "SVN Update 进行中，结束后会自动重新扫描"
               : textDiffCount
-              ? "先核对 SVN 状态，再更新全部白名单代码文本 Diff（.py、.cs、.bat、.ts、.cpp 等）"
+              ? "忽略当前列表筛选，核对所有支持的文本变更状态并更新 Diff 缓存（.cs、.ts、.py 等）；适合集中浏览代码差异"
               : "当前修改中没有符合后缀白名单的代码文本文件"}
             onClick={onUpdateAllTextDiffs}
           >

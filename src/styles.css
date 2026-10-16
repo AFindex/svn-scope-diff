@@ -1344,7 +1344,8 @@ button:disabled {
   gap: 3px;
 }
 
-.commit-selection-actions button {
+.commit-selection-actions button,
+.list-refresh-button {
   height: 23px;
   padding: 0 6px;
   color: #6e7683;
@@ -1356,12 +1357,14 @@ button:disabled {
   font-size: 9.5px;
 }
 
-.commit-selection-actions button:hover:not(:disabled) {
+.commit-selection-actions button:hover:not(:disabled),
+.list-refresh-button:hover:not(:disabled) {
   color: #345bc2;
   background: #e7ecf8;
 }
 
-.commit-selection-actions button:focus-visible {
+.commit-selection-actions button:focus-visible,
+.list-refresh-button:focus-visible {
   box-shadow: 0 0 0 2px #b2c4f4;
 }
 
@@ -3350,3 +3353,12 @@ button:disabled {
 .client-update-panel p { overflow-wrap: anywhere; }
 
 .history-banner { color: #456085; background: #f0f5fc; }
+
+.list-refresh-button {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+  font-family: inherit;
+  white-space: nowrap;
+}
